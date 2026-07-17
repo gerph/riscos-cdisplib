@@ -1,0 +1,12 @@
+/*******************************************************************
+ * File:        wimp_smoke
+ * Purpose:     Live Wimp smoke-test entry points for CDispLib
+ * Author:      Gerph
+ ******************************************************************/
+
+#ifndef CDISPLIB_WIMP_SMOKE_H
+#define CDISPLIB_WIMP_SMOKE_H
+
+int cdisplib_wimp_smoke_run(void);
+
+#endif

@@ -1,0 +1,110 @@
+/*******************************************************************
+ * File:        cdisplib
+ * Purpose:     Public interface for the C port of DispLib
+ * Author:      Gerph
+ ******************************************************************/
+
+#ifndef CDISPLIB_H
+#define CDISPLIB_H
+
+#include "os.h"
+#include "wimp.h"
+
+#ifndef CDISPLIB_DISPLAY_DECLARED
+#define CDISPLIB_DISPLAY_DECLARED
+typedef struct cdisplib_display CDispDisplay;
+#endif
+#ifndef CDISPLIB_LINE_DECLARED
+#define CDISPLIB_LINE_DECLARED
+typedef struct cdisplib_line CDispLine;
+#endif
+
+#include "cdisplib_render.h"
+
+const char *cdisplib_version(void);
+void cdisplib_init(void);
+void cdisplib_shutdown(void);
+void cdisplib_set_task_handle(wimp_t task_handle);
+wimp_t cdisplib_get_task_handle(void);
+
+CDispDisplay *cdisplib_display_new(const char *title);
+void cdisplib_display_kill(CDispDisplay **display);
+
+int cdisplib_display_lines(const CDispDisplay *display);
+wimp_w cdisplib_display_window(const CDispDisplay *display);
+CDispDisplay *cdisplib_display_find(wimp_w handle);
+
+void cdisplib_display_colours(CDispDisplay *display, int fg, int bg);
+void cdisplib_display_size(CDispDisplay *display, int min_width_chars, int natural_height_lines);
+void cdisplib_display_set_font(CDispDisplay *display, const char *font_name, int size_points);
+void cdisplib_display_get_font(const CDispDisplay *display, const char **font_name, int *size_points);
+
+void cdisplib_display_set_private_word(CDispDisplay *display, int private_word);
+int cdisplib_display_get_private_word(const CDispDisplay *display);
+int cdisplib_display_has_selection(const CDispDisplay *display);
+
+void cdisplib_display_open(CDispDisplay *display);
+void cdisplib_display_reopen(CDispDisplay *display, wimp_openstr *open);
+void cdisplib_display_close(CDispDisplay *display);
+void cdisplib_display_resize(CDispDisplay *display);
+void cdisplib_display_redraw(CDispDisplay *display);
+void cdisplib_display_fullsize(CDispDisplay *display);
+int cdisplib_display_moved(CDispDisplay *display);
+void cdisplib_display_title(CDispDisplay *display, const char *title);
+void cdisplib_display_set_palette(CDispDisplay *display, int entry, int colour);
+
+void cdisplib_display_clear(CDispDisplay *display);
+void cdisplib_display_add(CDispDisplay *display, const char *text);
+void cdisplib_display_add_at(CDispDisplay *display, CDispLine *after_line, const char *text);
+void cdisplib_display_add_to(CDispDisplay *display, const char *text, int bg, int fg);
+void cdisplib_display_add_to_at(CDispDisplay *display, CDispLine *line, const char *text, int bg, int fg);
+void cdisplib_display_delete_line(CDispDisplay *display, CDispLine *line);
+void cdisplib_display_wipe_line(CDispDisplay *display, CDispLine *line);
+
+CDispLine *cdisplib_display_line_handle(const CDispDisplay *display, int line_index);
+CDispLine *cdisplib_display_next_line(const CDispLine *line);
+CDispLine *cdisplib_display_prev_line(const CDispLine *line);
+CDispLine *cdisplib_display_line_from_y(const CDispDisplay *display, int y);
+int cdisplib_display_line_number_from_y(const CDispDisplay *display, int y);
+int cdisplib_display_line_number_from_handle(const CDispDisplay *display, const CDispLine *line);
+
+char *cdisplib_display_word_at(const CDispDisplay *display, const CDispLine *line, int x);
+char *cdisplib_display_line_from(const CDispDisplay *display, const CDispLine *line, int *x);
+char *cdisplib_display_line_to(const CDispDisplay *display, const CDispLine *line, int *x);
+char *cdisplib_display_line_from_char(const CDispDisplay *display, const CDispLine *line, int *column);
+char *cdisplib_display_line_from_start(const CDispDisplay *display, const CDispLine *line, int *x, int *bg, int *fg);
+int cdisplib_display_x_to_column(const CDispDisplay *display, const CDispLine *line, int x);
+int cdisplib_display_column_to_x(const CDispDisplay *display, const CDispLine *line, int column);
+
+void cdisplib_display_rel_xy(const CDispDisplay *display, int *x, int *y);
+void cdisplib_display_select_line_at(CDispDisplay *display, int x, int y);
+void cdisplib_display_select_all(CDispDisplay *display);
+void cdisplib_display_select_range(CDispDisplay *display,
+                                   int start_line,
+                                   int start_column,
+                                   int end_line,
+                                   int end_column);
+void cdisplib_display_selection_start(CDispDisplay *display, int x, int y, int start_new_selection, int user_drag);
+void cdisplib_display_selection_extend(CDispDisplay *display, int x, int y);
+void cdisplib_display_selection_modify(CDispDisplay *display, int x, int y);
+void cdisplib_display_selection_clear(CDispDisplay *display);
+void cdisplib_display_selection_end(CDispDisplay *display);
+void cdisplib_display_drag_check(const wimp_mousestr *mouse, wimp_bbits buttons);
+void cdisplib_display_mode_change(void);
+void cdisplib_display_copy_selection(CDispDisplay *display);
+int cdisplib_display_clipboard_message(wimp_msgstr *message);
+wimp_menustr *cdisplib_display_edit_menu(void);
+wimp_menustr *cdisplib_display_menu(void);
+wimp_menustr *cdisplib_display_menu_with_append(const char *append);
+wimp_menustr *cdisplib_display_menu_with_extras(const char *const *extra_labels, int extra_count);
+int cdisplib_display_menu_extra_base(void);
+void cdisplib_display_edit_menu_setup(CDispDisplay *display);
+void cdisplib_display_menu_setup(CDispDisplay *display, const int *selection, int x, int y);
+void cdisplib_display_edit_menu_choice(CDispDisplay *display, const int *selection);
+void cdisplib_display_menu_choice(CDispDisplay *display, const int *selection);
+
+char *cdisplib_display_read_selection(CDispDisplay *display, CDispLine **line, int *line_number, int *column);
+void cdisplib_display_save_text(const CDispDisplay *display, const char *filename);
+void cdisplib_display_save_selection(CDispDisplay *display, const char *filename);
+
+#endif

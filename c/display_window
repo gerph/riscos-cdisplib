@@ -1,0 +1,617 @@
+/*******************************************************************
+ * File:        display_window
+ * Purpose:     Window management for CDispLib
+ * Author:      Gerph
+ ******************************************************************/
+
+#include "cdisplib_internal.h"
+
+static void cdisplib_force_window_outline_redraw(wimp_w handle);
+
+/*******************************************************************
+ Function:      cdisplib_force_window_outline_redraw
+ Description:   Force redraw of a window's outline rectangle
+ Parameters:    handle = window handle to outline
+ Returns:       none
+ ******************************************************************/
+static void cdisplib_force_window_outline_redraw(wimp_w handle)
+{
+    wimp_redrawstr redraw;
+
+    if (handle == -1)
+    {
+        return;
+    }
+
+    memset(&redraw, 0, sizeof(redraw));
+    redraw.w = handle;
+    if (wimp_getwindowoutline(&redraw) != NULL)
+    {
+        return;
+    }
+
+    redraw.w = (wimp_w) -1;
+    wimp_force_redraw(&redraw);
+}
+
+/*******************************************************************
+ Function:      cdisplib_prepare_recreated_window
+ Description:   Prepare a recreated window definition after a title change
+ Parameters:    current_info = current Wimp window definition
+                title = replacement title text
+                recreated_info = returned definition for CreateWindow
+ Returns:       none
+ ******************************************************************/
+void cdisplib_prepare_recreated_window(const wimp_wind *current_info,
+                                       const char *title,
+                                       wimp_wind *recreated_info)
+{
+    if (current_info == NULL || recreated_info == NULL)
+    {
+        return;
+    }
+
+    *recreated_info = *current_info;
+    recreated_info->title.indirecttext.buffer = (char *) (title != NULL ? title : "");
+    recreated_info->title.indirecttext.validstring = NULL;
+    recreated_info->title.indirecttext.bufflen = (int) strlen(title != NULL ? title : "");
+}
+
+/*******************************************************************
+ Function:      cdisplib_force_redraw
+ Description:   Ask the Wimp to redraw a work-area rectangle
+ Parameters:    display = display to invalidate
+                xmin = minimum x
+                ymin = minimum y
+                xmax = maximum x
+                ymax = maximum y
+ Returns:       none
+ ******************************************************************/
+void cdisplib_force_redraw(CDispDisplay *display, int xmin, int ymin, int xmax, int ymax)
+{
+    wimp_redrawstr redraw;
+
+    if (display == NULL || display->window_handle == -1)
+    {
+        return;
+    }
+
+    redraw.w = display->window_handle;
+    redraw.box.x0 = xmin;
+    redraw.box.y0 = ymin;
+    redraw.box.x1 = xmax;
+    redraw.box.y1 = ymax;
+    wimp_force_redraw(&redraw);
+}
+
+/*******************************************************************
+ Function:      cdisplib_adjust_resize_open
+ Description:   Adjust an open block after an extent change
+ Parameters:    display = display supplying natural/full sizes
+                was_open = non-zero if the window was open
+                current_open = current open-window state
+                current_info = current window information/extent
+                new_extent = replacement extent
+                adjusted_open = returned adjusted open block
+                moved = set non-zero if the resize effectively moved the view
+ Returns:       none
+ ******************************************************************/
+void cdisplib_adjust_resize_open(const CDispDisplay *display,
+                                 int was_open,
+                                 const wimp_openstr *current_open,
+                                 const wimp_wind *current_info,
+                                 const wimp_box *new_extent,
+                                 wimp_openstr *adjusted_open,
+                                 int *moved)
+{
+    int view_height;
+    int view_width;
+    int old_extent_height;
+    int old_extent_width;
+    int new_extent_height;
+    int new_extent_width;
+    int yfull;
+    int xfull;
+    int ybot;
+
+    if (display == NULL || current_open == NULL || current_info == NULL ||
+        new_extent == NULL || adjusted_open == NULL)
+    {
+        return;
+    }
+
+    if (moved != NULL)
+    {
+        *moved = 0;
+    }
+
+    *adjusted_open = *current_open;
+    view_height = current_open->box.y1 - current_open->box.y0;
+    view_width = current_open->box.x1 - current_open->box.x0;
+    old_extent_height = current_info->ex.y1 - current_info->ex.y0;
+    old_extent_width = current_info->ex.x1 - current_info->ex.x0;
+    new_extent_height = new_extent->y1 - new_extent->y0;
+    new_extent_width = new_extent->x1 - new_extent->x0;
+
+    yfull = view_height >= old_extent_height;
+    xfull = view_width >= old_extent_width;
+    ybot = (current_open->y - view_height) == (current_info->ex.y0 - current_info->ex.y1);
+    if (!was_open)
+    {
+        ybot = 1;
+    }
+
+    if (yfull)
+    {
+        adjusted_open->box.y0 = adjusted_open->box.y1 - new_extent_height;
+        if (display->line_count >= display->natural_height_lines &&
+            ((old_extent_height < display->natural_height_lines * display->font_metrics.line_height +
+                                 CDISPLIB_WINDOW_BOTTOM_MARGIN) ||
+             (display->line_count == display->natural_height_lines + 1)))
+        {
+            adjusted_open->box.y0 = adjusted_open->box.y1 -
+                                    (display->natural_height_lines * display->font_metrics.line_height +
+                                     CDISPLIB_WINDOW_BOTTOM_MARGIN);
+        }
+        else if (moved != NULL)
+        {
+            *moved = 1;
+        }
+    }
+
+    if (ybot)
+    {
+        adjusted_open->y = new_extent->y0 - new_extent->y1 +
+                           (adjusted_open->box.y1 - adjusted_open->box.y0);
+    }
+
+    if (xfull)
+    {
+        adjusted_open->box.x1 = adjusted_open->box.x0 + new_extent_width;
+        if (moved != NULL)
+        {
+            *moved = 1;
+        }
+    }
+}
+
+/*******************************************************************
+ Function:      cdisplib_adjust_reopen_for_bottom
+ Description:   Preserve the bottom of the display on resize when already there
+ Parameters:    current_open = current open-window state
+                current_info = current window information/extent
+                requested_open = pending open-window request to update
+ Returns:       none
+ ******************************************************************/
+void cdisplib_adjust_reopen_for_bottom(const wimp_openstr *current_open,
+                                       const wimp_wind *current_info,
+                                       wimp_openstr *requested_open)
+{
+    int current_height;
+
+    if (current_open == NULL || current_info == NULL || requested_open == NULL)
+    {
+        return;
+    }
+
+    current_height = current_open->box.y1 - current_open->box.y0;
+    if (current_open->y == requested_open->y &&
+        current_open->y - current_height == current_info->ex.y0)
+    {
+        requested_open->y = current_info->ex.y0 +
+                            (requested_open->box.y1 - requested_open->box.y0);
+    }
+}
+
+/*******************************************************************
+ Function:      cdisplib_adjust_fullsize_open
+ Description:   Prepare the open block for a full-size display view
+ Parameters:    display = display supplying current content size
+                current_open = current open-window state
+                adjusted_open = returned full-size open block
+ Returns:       none
+ ******************************************************************/
+void cdisplib_adjust_fullsize_open(const CDispDisplay *display,
+                                   const wimp_openstr *current_open,
+                                   wimp_openstr *adjusted_open)
+{
+    if (display == NULL || current_open == NULL || adjusted_open == NULL)
+    {
+        return;
+    }
+
+    *adjusted_open = *current_open;
+    adjusted_open->box.y0 = adjusted_open->box.y1 -
+                            display->line_count * display->font_metrics.line_height -
+                            CDISPLIB_WINDOW_BOTTOM_MARGIN;
+    adjusted_open->box.x1 = adjusted_open->box.x0 + display->widest_width + 12;
+}
+
+/*******************************************************************
+ Function:      cdisplib_make_window
+ Description:   Create the Wimp window for a display
+ Parameters:    display = display to realise
+ Returns:       none
+ ******************************************************************/
+void cdisplib_make_window(CDispDisplay *display)
+{
+    int eig;
+    int mode_height;
+    wimp_wind window;
+    os_error *error;
+
+    if (display == NULL || display->window_handle != -1)
+    {
+        return;
+    }
+
+    cdisplib_global_window_y -= CDISPLIB_WINDOW_Y_STEP;
+    if (cdisplib_global_window_y < CDISPLIB_DEFAULT_WINDOW_LEFT)
+    {
+        eig = 0;
+        mode_height = 0;
+        _swix(OS_ReadModeVariable, _IN(0) | _IN(1) | _OUT(2), -1, 5, &eig);
+        _swix(OS_ReadModeVariable, _IN(0) | _IN(1) | _OUT(2), -1, 12, &mode_height);
+        cdisplib_global_window_y = (((mode_height + 1) << eig) * 7 / 8) & ~3;
+    }
+
+    memset(&window, 0, sizeof(window));
+    window.box.x0 = 64;
+    window.box.y0 = cdisplib_global_window_y - display->natural_height_lines * display->font_metrics.line_height;
+    window.box.x1 = CDISPLIB_DEFAULT_WINDOW_LEFT;
+    window.box.y1 = cdisplib_global_window_y;
+    window.scx = 0;
+    window.scy = display->natural_height_lines * display->font_metrics.line_height -
+                 display->line_count * display->font_metrics.line_height;
+    window.behind = -1;
+    window.flags = (wimp_wflags) (wimp_WNEW | wimp_WMOVEABLE | wimp_WBACK | wimp_WTITLE |
+                   wimp_WTOGGLE | wimp_WVSCR | wimp_WSIZE);
+    window.colours[wimp_WCTITLEFORE] = 7;
+    window.colours[wimp_WCTITLEBACK] = 2;
+    window.colours[wimp_WCWKAREAFORE] = 7;
+    window.colours[wimp_WCWKAREABACK] = 1;
+    window.colours[wimp_WCSCROLLOUTER] = 3;
+    window.colours[wimp_WCSCROLLINNER] = 1;
+    window.colours[wimp_WCTITLEHI] = 12;
+    window.colours[wimp_WCRESERVED] = 0;
+    window.ex.x0 = 0;
+    window.ex.y0 = -display->line_count * display->font_metrics.line_height;
+    window.ex.x1 = 0;
+    window.ex.y1 = 0;
+    window.titleflags = (wimp_iconflags) 0x13D;
+    window.workflags = (wimp_iconflags) 0xA000;
+    window.spritearea = NULL;
+    window.minsize = 1 | ((display->min_width_chars * display->font_metrics.max_char_width + 4) << 16);
+    window.title.indirecttext.buffer = display->title;
+    window.title.indirecttext.validstring = NULL;
+    window.title.indirecttext.bufflen = (int) strlen(display->title);
+    window.nicons = 0;
+
+    error = _swix(Wimp_CreateWindow, _IN(1) | _OUT(0), &window, &display->window_handle);
+    if (error != NULL)
+    {
+        display->window_handle = -1;
+        return;
+    }
+
+    cdisplib_display_resize(display);
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_open
+ Description:   Open a display window
+ Parameters:    display = display to open
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_open(CDispDisplay *display)
+{
+    wimp_openstr open;
+    wimp_wstate state;
+
+    if (display == NULL)
+    {
+        return;
+    }
+
+    if (display->window_handle == -1)
+    {
+        cdisplib_make_window(display);
+    }
+    if (display->window_handle == -1)
+    {
+        return;
+    }
+
+    if (wimp_get_wind_state(display->window_handle, &state) != NULL)
+    {
+        return;
+    }
+
+    open = state.o;
+    wimp_open_wind(&open);
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_close
+ Description:   Close a display window and forget the handle
+ Parameters:    display = display to close
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_close(CDispDisplay *display)
+{
+    if (display != NULL && display->window_handle != -1)
+    {
+        wimp_delete_wind(display->window_handle);
+        display->window_handle = -1;
+    }
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_resize
+ Description:   Resize the display work area and visible window if needed
+ Parameters:    display = display to resize
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_resize(CDispDisplay *display)
+{
+    wimp_wstate state;
+    wimp_redrawstr extent;
+    wimp_winfo info;
+    wimp_openstr adjusted_open;
+    int was_open;
+    int moved;
+
+    if (display == NULL || display->window_handle == -1)
+    {
+        return;
+    }
+
+    if (wimp_get_wind_state(display->window_handle, &state) != NULL)
+    {
+        return;
+    }
+
+    extent.w = display->window_handle;
+    extent.box.x0 = 0;
+    extent.box.y0 = -display->line_count * display->font_metrics.line_height - CDISPLIB_WINDOW_BOTTOM_MARGIN;
+    extent.box.x1 = display->widest_width + 12 + display->font_metrics.left_margin;
+    extent.box.y1 = 0;
+
+    info.w = display->window_handle;
+    if (wimp_get_wind_info(&info) != NULL)
+    {
+        wimp_set_extent(&extent);
+        return;
+    }
+
+    was_open = (state.flags & wimp_WOPEN) != 0;
+    moved = 0;
+    cdisplib_adjust_resize_open(display,
+                                was_open,
+                                &state.o,
+                                &info.info,
+                                &extent.box,
+                                &adjusted_open,
+                                &moved);
+    wimp_set_extent(&extent);
+    if (was_open)
+    {
+        wimp_open_wind(&adjusted_open);
+    }
+    if (moved)
+    {
+        display->flags |= CDISPLIB_DISPLAY_MOVED;
+    }
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_reopen
+ Description:   Reopen using an open-window request block
+ Parameters:    display = display being reopened
+                open = open-window request to modify
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_reopen(CDispDisplay *display, wimp_openstr *open)
+{
+    wimp_wstate state;
+    wimp_winfo info;
+
+    if (display == NULL || open == NULL)
+    {
+        return;
+    }
+
+    if (wimp_get_wind_state(display->window_handle, &state) == NULL)
+    {
+        info.w = display->window_handle;
+        if (wimp_get_wind_info(&info) == NULL)
+        {
+            cdisplib_adjust_reopen_for_bottom(&state.o, &info.info, open);
+        }
+    }
+
+    wimp_open_wind(open);
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_fullsize
+ Description:   Force a display window to full content size
+ Parameters:    display = display to resize
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_fullsize(CDispDisplay *display)
+{
+    wimp_wstate state;
+    wimp_redrawstr extent;
+    int was_open;
+
+    if (display == NULL || display->window_handle == -1)
+    {
+        return;
+    }
+
+    if (wimp_get_wind_state(display->window_handle, &state) != NULL)
+    {
+        return;
+    }
+
+    was_open = (state.flags & wimp_WOPEN) != 0;
+    if (was_open)
+    {
+        cdisplib_force_redraw(display,
+                              0,
+                              -display->line_count * display->font_metrics.line_height - CDISPLIB_WINDOW_BOTTOM_MARGIN,
+                              display->widest_width + 12,
+                              state.o.y - (state.o.box.y1 - state.o.box.y0) + CDISPLIB_WINDOW_BOTTOM_MARGIN);
+    }
+
+    extent.w = display->window_handle;
+    extent.box.x0 = 0;
+    extent.box.y0 = -display->line_count * display->font_metrics.line_height - CDISPLIB_WINDOW_BOTTOM_MARGIN;
+    extent.box.x1 = display->widest_width + 12;
+    extent.box.y1 = 0;
+    wimp_set_extent(&extent);
+
+    cdisplib_adjust_fullsize_open(display, &state.o, &state.o);
+    wimp_open_wind(&state.o);
+    display->flags |= CDISPLIB_DISPLAY_MOVED;
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_moved
+ Description:   Report and clear the moved flag
+ Parameters:    display = display to query
+ Returns:       non-zero if moved
+ ******************************************************************/
+int cdisplib_display_moved(CDispDisplay *display)
+{
+    int moved;
+
+    if (display == NULL)
+    {
+        return 0;
+    }
+
+    moved = (display->flags & CDISPLIB_DISPLAY_MOVED) != 0;
+    display->flags &= ~CDISPLIB_DISPLAY_MOVED;
+    return moved;
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_title
+ Description:   Change the window title
+ Parameters:    display = display to update
+                title = new title
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_title(CDispDisplay *display, const char *title)
+{
+    wimp_wstate state;
+    wimp_winfo info;
+    wimp_wind recreated_info;
+    int was_open;
+    os_error *error;
+
+    if (display == NULL)
+    {
+        return;
+    }
+
+    memset(&state, 0, sizeof(state));
+    was_open = 0;
+    if (display->window_handle != -1)
+    {
+        if (wimp_get_wind_state(display->window_handle, &state) == NULL)
+        {
+            was_open = (state.flags & wimp_WOPEN) != 0;
+        }
+    }
+
+    free(display->title);
+    display->title = cdisplib_strdup(title != NULL ? title : "");
+
+    if (display->window_handle != -1)
+    {
+        info.w = display->window_handle;
+        if (wimp_get_wind_info(&info) == NULL)
+        {
+            cdisplib_prepare_recreated_window(&info.info, display->title, &recreated_info);
+            cdisplib_display_close(display);
+            error = _swix(Wimp_CreateWindow, _IN(1) | _OUT(0), &recreated_info, &display->window_handle);
+            if (error == NULL && display->window_handle != -1)
+            {
+                if (was_open)
+                {
+                    state.o.w = display->window_handle;
+                    wimp_open_wind(&state.o);
+                }
+                cdisplib_force_window_outline_redraw(display->window_handle);
+            }
+            else
+            {
+                display->window_handle = -1;
+            }
+        }
+        else
+        {
+            cdisplib_display_close(display);
+            cdisplib_make_window(display);
+            if (display->window_handle != -1)
+            {
+                if (was_open)
+                {
+                    state.o.w = display->window_handle;
+                    wimp_open_wind(&state.o);
+                }
+                cdisplib_force_window_outline_redraw(display->window_handle);
+            }
+        }
+    }
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_set_palette
+ Description:   Set a private palette entry
+ Parameters:    display = display to update
+                entry = private palette entry number
+                colour = colour value
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_set_palette(CDispDisplay *display, int entry, int colour)
+{
+    int *new_entries;
+    int i;
+
+    if (display == NULL || entry < 0 || colour == -1)
+    {
+        return;
+    }
+
+    if (entry >= display->private_palette.count)
+    {
+        new_entries = malloc((size_t) (entry + 1) * sizeof(int));
+        if (new_entries == NULL)
+        {
+            return;
+        }
+
+        for (i = 0; i <= entry; ++i)
+        {
+            new_entries[i] = 0x10;
+        }
+        for (i = 0; i < display->private_palette.count; ++i)
+        {
+            new_entries[i] = display->private_palette.entries[i];
+        }
+        free(display->private_palette.entries);
+        display->private_palette.entries = new_entries;
+        display->private_palette.count = entry + 1;
+    }
+
+    display->private_palette.entries[entry] = colour;
+    cdisplib_force_redraw(display,
+                          0,
+                          -display->line_count * display->font_metrics.line_height - CDISPLIB_WINDOW_BOTTOM_MARGIN,
+                          display->widest_width + 12 + display->font_metrics.left_margin,
+                          0);
+}

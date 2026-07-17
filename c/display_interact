@@ -1,0 +1,331 @@
+/*******************************************************************
+ * File:        display_interact
+ * Purpose:     Clipboard, mode-change, and mouse interaction support
+ * Author:      Gerph
+ ******************************************************************/
+
+#include "cdisplib_internal.h"
+
+static void cdisplib_clipboard_replace(char *buffer, int size);
+#define CDISPLIB_CLIPBOARD_LEAF "Clipboard"
+
+/*******************************************************************
+ Function:      cdisplib_clipboard_replace
+ Description:   Replace the global clipboard buffer
+ Parameters:    buffer = new clipboard buffer
+                size = clipboard size in bytes
+ Returns:       none
+ ******************************************************************/
+static void cdisplib_clipboard_replace(char *buffer, int size)
+{
+    free(cdisplib_global_clipboard);
+    cdisplib_global_clipboard = buffer;
+    cdisplib_global_clipboard_size = size;
+}
+
+/*******************************************************************
+ Function:      cdisplib_save_clipboard_file
+ Description:   Write the clipboard buffer to a file and mark its type
+ Parameters:    filename = output filename
+ Returns:       non-zero on success
+ ******************************************************************/
+int cdisplib_save_clipboard_file(const char *filename)
+{
+    FILE *out;
+    size_t written;
+    os_error *error;
+
+    if (filename == NULL || cdisplib_global_clipboard == NULL)
+    {
+        return 0;
+    }
+
+    out = fopen(filename, "wb");
+    if (out == NULL)
+    {
+        return 0;
+    }
+
+    written = fwrite(cdisplib_global_clipboard,
+                     1,
+                     (size_t) cdisplib_global_clipboard_size,
+                     out);
+    fclose(out);
+
+    if (written != (size_t) cdisplib_global_clipboard_size)
+    {
+        return 0;
+    }
+
+    error = _swix(OS_File, _INR(0, 2), 18, filename, 0xFFF);
+    return error == NULL;
+}
+
+/*******************************************************************
+ Function:      cdisplib_prepare_clipboard_datasave_message
+ Description:   Populate a clipboard DataSave message block
+ Parameters:    message = message block to populate
+                task_handle = destination task handle
+                your_ref = reference being answered
+                estimated_size = clipboard size in bytes
+ Returns:       none
+ ******************************************************************/
+void cdisplib_prepare_clipboard_datasave_message(wimp_msgstr *message,
+                                                 wimp_t task_handle,
+                                                 int your_ref,
+                                                 int estimated_size)
+{
+    int size;
+
+    if (message == NULL)
+    {
+        return;
+    }
+
+    memset(message, 0, sizeof(*message));
+    size = (48 + (int) strlen(CDISPLIB_CLIPBOARD_LEAF)) & ~3;
+    message->hdr.size = size;
+    message->hdr.your_ref = your_ref;
+    message->hdr.action = wimp_MDATASAVE;
+    message->hdr.task = task_handle;
+    message->data.datasave.estsize = estimated_size;
+    message->data.datasave.type = 0xFFF;
+    strcpy(message->data.datasave.leaf, CDISPLIB_CLIPBOARD_LEAF);
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_mode_change
+ Description:   Refresh palette and font caches after a mode change
+ Parameters:    none
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_mode_change(void)
+{
+    int i;
+    wimp_palettestr palette;
+    CDispDisplay *display;
+
+    if (wimp_readpalette(&palette) == NULL)
+    {
+        for (i = 0; i != 16; ++i)
+        {
+            cdisplib_global_palette[i] = palette.c[i].word;
+        }
+    }
+
+    display = cdisplib_global_displays;
+    while (display != NULL)
+    {
+        cdisplib_validate_font(display);
+        display = display->next_global;
+    }
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_drag_check
+ Description:   Route a mouse event into display selection handling
+ Parameters:    mouse = mouse state from the Wimp
+                buttons = button transition bits
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_drag_check(const wimp_mousestr *mouse, wimp_bbits buttons)
+{
+    CDispDisplay *display;
+    int x;
+    int y;
+
+    if (mouse == NULL)
+    {
+        return;
+    }
+
+    display = cdisplib_display_find(mouse->w);
+    if (display == NULL)
+    {
+        return;
+    }
+
+    x = mouse->x;
+    y = mouse->y;
+    cdisplib_display_rel_xy(display, &x, &y);
+
+    switch (buttons)
+    {
+    case wimp_BDRAGLEFT:
+    case wimp_BDRAGRIGHT:
+        cdisplib_display_selection_start(display,
+                                         x,
+                                         y,
+                                         buttons == wimp_BDRAGLEFT,
+                                         1);
+        break;
+
+    case wimp_BCLICKRIGHT:
+        cdisplib_display_selection_extend(display, x, y);
+        break;
+
+    case wimp_BLEFT:
+        cdisplib_display_select_line_at(display, x, y);
+        break;
+
+    default:
+        break;
+    }
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_copy_selection
+ Description:   Copy the current selection to the Wimp clipboard
+ Parameters:    display = display to copy from
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_copy_selection(CDispDisplay *display)
+{
+    CDispLine *line;
+    int line_number;
+    int column;
+    int used;
+    int capacity;
+    char *buffer;
+    char *part;
+
+    if (display == NULL || !cdisplib_display_has_selection(display))
+    {
+        return;
+    }
+
+    capacity = 64;
+    used = 0;
+    buffer = malloc((size_t) capacity);
+    if (buffer == NULL)
+    {
+        return;
+    }
+
+    line = NULL;
+    line_number = 0;
+    column = 0;
+    do
+    {
+        int part_length;
+        int required;
+
+        part = cdisplib_display_read_selection(display, &line, &line_number, &column);
+        if (part == NULL)
+        {
+            free(buffer);
+            return;
+        }
+
+        part_length = (int) strlen(part);
+        required = used + part_length + ((*part == '\0' && line != NULL) ? 1 : 0) + 1;
+        if (required > capacity)
+        {
+            char *grown;
+
+            while (required > capacity)
+            {
+                capacity *= 2;
+            }
+            grown = realloc(buffer, (size_t) capacity);
+            if (grown == NULL)
+            {
+                free(part);
+                free(buffer);
+                return;
+            }
+            buffer = grown;
+        }
+
+        memcpy(buffer + used, part, (size_t) part_length);
+        used += part_length;
+        if (*part == '\0' && line != NULL)
+        {
+            buffer[used] = '\n';
+            used += 1;
+        }
+        free(part);
+    }
+    while (line != NULL);
+
+    buffer[used] = '\0';
+    cdisplib_clipboard_replace(buffer, used);
+
+    {
+        wimp_msgstr message;
+
+        memset(&message, 0, sizeof(message));
+        message.hdr.size = 24;
+        message.hdr.action = wimp_MCLAIMENTITY;
+        message.data.claimentity.flags = wimp_CECLIPBOARD;
+        wimp_sendmessage(wimp_ESEND, &message, 0);
+    }
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_clipboard_message
+ Description:   Process clipboard-related Wimp messages
+ Parameters:    message = message block to process
+ Returns:       non-zero if consumed
+ ******************************************************************/
+int cdisplib_display_clipboard_message(wimp_msgstr *message)
+{
+    if (message == NULL)
+    {
+        return 0;
+    }
+
+    switch (message->hdr.action)
+    {
+    case wimp_MDATASAVEOK:
+        if (message->hdr.your_ref == cdisplib_global_clipboard_save_ref &&
+            cdisplib_global_clipboard != NULL)
+        {
+            if (cdisplib_save_clipboard_file(message->data.datasaveok.name))
+            {
+                message->hdr.your_ref = message->hdr.my_ref;
+                message->hdr.action = wimp_MDATALOAD;
+                wimp_sendmessage(wimp_ESEND, message, message->hdr.task);
+                return 1;
+            }
+        }
+        break;
+
+    case wimp_MCLAIMENTITY:
+        if ((message->data.claimentity.flags & wimp_CECLIPBOARD) != 0)
+        {
+            if (cdisplib_global_clipboard != NULL &&
+                (cdisplib_global_task_handle == -1 ||
+                 message->hdr.task != cdisplib_global_task_handle))
+            {
+                cdisplib_clipboard_replace(NULL, 0);
+                return 1;
+            }
+        }
+        break;
+
+    case wimp_MDATAREQUEST:
+        if (cdisplib_global_clipboard != NULL &&
+            (message->data.datarequest.flags & wimp_CECLIPBOARD) != 0)
+        {
+            wimp_t task_handle;
+            int your_ref;
+
+            task_handle = message->hdr.task;
+            your_ref = message->hdr.my_ref;
+            cdisplib_prepare_clipboard_datasave_message(message,
+                                                        task_handle,
+                                                        your_ref,
+                                                        cdisplib_global_clipboard_size);
+            wimp_sendmessage(wimp_ESENDWANTACK, message, task_handle);
+            cdisplib_global_clipboard_save_ref = message->hdr.my_ref;
+            return 1;
+        }
+        break;
+
+    default:
+        break;
+    }
+
+    return 0;
+}

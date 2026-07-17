@@ -1,0 +1,28 @@
+/*******************************************************************
+ * File:        cdisplib_render
+ * Purpose:     Wimp-independent rendering interface for CDispLib
+ * Author:      Gerph
+ ******************************************************************/
+
+#ifndef CDISPLIB_RENDER_H
+#define CDISPLIB_RENDER_H
+
+#ifndef CDISPLIB_DISPLAY_DECLARED
+#define CDISPLIB_DISPLAY_DECLARED
+typedef struct cdisplib_display CDispDisplay;
+#endif
+
+typedef struct cdisplib_render_box
+{
+    int x0;
+    int y0;
+    int x1;
+    int y1;
+} CDispRenderBox;
+
+void cdisplib_display_render(CDispDisplay *display,
+                             int work_left,
+                             int work_top,
+                             const CDispRenderBox *clip);
+
+#endif

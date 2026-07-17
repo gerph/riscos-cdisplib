@@ -1,0 +1,226 @@
+/*******************************************************************
+ * File:        main
+ * Purpose:     CDispLib command line tool
+ * Author:      Gerph
+ ******************************************************************/
+
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+
+#include "swis.h"
+#include "os.h"
+
+#include "VersionNum"
+#include "cdisplib.h"
+#include "selftest.h"
+#include "wimp_smoke.h"
+
+static CDispDisplay *cdisplib_build_demo_display(void);
+static int cdisplib_screen_height(void);
+
+/*******************************************************************
+ Function:      cdisplib_print_line_runs
+ Description:   Print a line as a sequence of text runs
+ Parameters:    display = display containing the line
+                line = line to print
+ Returns:       none
+ ******************************************************************/
+static void cdisplib_print_line_runs(CDispDisplay *display, CDispLine *line)
+{
+    int x;
+    int bg;
+    int fg;
+    char *text;
+
+    x = 4;
+    for (;;)
+    {
+        text = cdisplib_display_line_from_start(display, line, &x, &bg, &fg);
+        if (text == NULL || *text == '\0')
+        {
+            free(text);
+            break;
+        }
+
+        printf("    run fg=%d bg=%d text=\"%s\"\n", fg, bg, text);
+        free(text);
+    }
+}
+
+/*******************************************************************
+ Function:      cdisplib_build_demo_display
+ Description:   Build the shared demo display contents
+ Parameters:    none
+ Returns:       populated display or NULL
+ ******************************************************************/
+static CDispDisplay *cdisplib_build_demo_display(void)
+{
+    CDispDisplay *display;
+
+    display = cdisplib_display_new("Demo");
+    if (display == NULL)
+    {
+        return NULL;
+    }
+
+    cdisplib_display_colours(display, 7, -1);
+    cdisplib_display_add(display, "Boot");
+    cdisplib_display_add_to(display, ": initialising display library", -1, 11);
+    cdisplib_display_add(display, "Info");
+    cdisplib_display_add_to(display, ": rendering path exercised without Wimp", -1, 2);
+    cdisplib_display_add(display, "Warn");
+    cdisplib_display_add_to(display, ": no desktop session required", -1, 9);
+    cdisplib_display_add(display, "Done");
+    cdisplib_display_add_to(display, ": example message stream complete", -1, 10);
+
+    return display;
+}
+
+/*******************************************************************
+ Function:      cdisplib_screen_height
+ Description:   Read the current screen height in OS units
+ Parameters:    none
+ Returns:       screen height in OS units
+ ******************************************************************/
+static int cdisplib_screen_height(void)
+{
+    int eig_y;
+    int mode_height;
+
+    eig_y = 0;
+    mode_height = 0;
+    _swix(OS_ReadModeVariable, _IN(0) | _IN(1) | _OUT(2), -1, 5, &eig_y);
+    _swix(OS_ReadModeVariable, _IN(0) | _IN(1) | _OUT(2), -1, 12, &mode_height);
+
+    return (mode_height + 1) << eig_y;
+}
+
+/*******************************************************************
+ Function:      cdisplib_run_demo
+ Description:   Build and print a simple non-Wimp display example
+ Parameters:    none
+ Returns:       none
+ ******************************************************************/
+static void cdisplib_run_demo(void)
+{
+    CDispDisplay *display;
+    CDispLine *line;
+    int line_number;
+    int x;
+    char *text;
+    int printed_any;
+
+    display = cdisplib_build_demo_display();
+    if (display == NULL)
+    {
+        printf("Failed to create demo display\n");
+        return;
+    }
+
+    printf("CDispLib %s\n", Module_FullVersionAndDate);
+    printf("Demo display contents:\n");
+
+    line = cdisplib_display_line_handle(display, 0);
+    line_number = 0;
+    while (line != NULL)
+    {
+        x = 4;
+        printed_any = 0;
+        printf("  line %d: ", line_number);
+        for (;;)
+        {
+            text = cdisplib_display_line_from(display, line, &x);
+            if (text == NULL || *text == '\0')
+            {
+                free(text);
+                break;
+            }
+
+            printf("%s", text);
+            printed_any = 1;
+            free(text);
+        }
+        if (!printed_any)
+        {
+            printf("(empty)");
+        }
+        printf("\n");
+        cdisplib_print_line_runs(display, line);
+
+        line = cdisplib_display_next_line(line);
+        line_number += 1;
+    }
+
+    cdisplib_display_kill(&display);
+}
+
+/*******************************************************************
+ Function:      cdisplib_run_render_demo
+ Description:   Build and render a simple non-Wimp display example
+ Parameters:    none
+ Returns:       success flag
+ ******************************************************************/
+static int cdisplib_run_render_demo(void)
+{
+    CDispDisplay *display;
+    CDispRenderBox clip;
+    int work_left;
+    int work_top;
+
+    display = cdisplib_build_demo_display();
+    if (display == NULL)
+    {
+        printf("Failed to create render display\n");
+        return 0;
+    }
+
+    work_left = 64;
+    work_top = cdisplib_screen_height() - 64;
+    clip.x0 = work_left;
+    clip.y0 = work_top - (cdisplib_display_lines(display) * 36) - 32;
+    clip.x1 = work_left + 1024;
+    clip.y1 = work_top + 16;
+
+    printf("CDispLib %s\n", Module_FullVersionAndDate);
+    printf("Rendering demo display at (%d,%d)\n", work_left, work_top);
+    _swix(OS_WriteI+5, 0);
+    cdisplib_display_render(display, work_left, work_top, &clip);
+    _swix(OS_WriteI+4, 0);
+    printf("Render complete\n");
+
+    cdisplib_display_kill(&display);
+    return 1;
+}
+
+int main(int argc, char *argv[])
+{
+    int exit_code;
+
+    exit_code = EXIT_SUCCESS;
+    cdisplib_init();
+    if (argc > 1 && strcmp(argv[1], "--selftest") == 0)
+    {
+        exit_code = cdisplib_selftest_run() ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
+    else if (argc > 1 && strcmp(argv[1], "--show") == 0)
+    {
+        cdisplib_run_demo();
+    }
+    else if (argc > 1 && strcmp(argv[1], "--render") == 0)
+    {
+        exit_code = cdisplib_run_render_demo() ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
+    else if (argc > 1 && strcmp(argv[1], "--wimp-smoke") == 0)
+    {
+        exit_code = cdisplib_wimp_smoke_run() ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
+    else
+    {
+        printf("CDispLib " Module_FullVersionAndDate "\n");
+        printf("Syntax: *CDispLib [--show] [--render] [--selftest] [--wimp-smoke]\n");
+    }
+    cdisplib_shutdown();
+
+    exit(exit_code);
+}

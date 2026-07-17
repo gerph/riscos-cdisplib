@@ -1,0 +1,706 @@
+/*******************************************************************
+ * File:        display_selection
+ * Purpose:     Selection handling for CDispLib
+ * Author:      Gerph
+ ******************************************************************/
+
+#include "cdisplib_internal.h"
+
+typedef struct cdisplib_autoscroll_block
+{
+    wimp_w window;
+    wimp_box pause_zone;
+    int pause_time;
+    int state_change_handler;
+    int workspace;
+} CDispAutoScrollBlock;
+
+static int cdisplib_clamp_line(const CDispDisplay *display, int line);
+static int cdisplib_line_text_length(const CDispLine *line);
+static int cdisplib_clamp_column(const CDispLine *line, int column, int is_end_marker);
+static void cdisplib_selection_point_from_xy(const CDispDisplay *display,
+                                             int x,
+                                             int y,
+                                             CDispSelectionPoint *point);
+static void cdisplib_selection_redraw_range(CDispDisplay *display,
+                                            CDispSelectionBounds old_bounds,
+                                            CDispSelectionBounds new_bounds);
+static void cdisplib_start_selection_drag(CDispDisplay *display);
+
+/*******************************************************************
+ Function:      cdisplib_selection_compare_points
+ Description:   Compare two selection points
+ Parameters:    lhs = left-hand point
+                rhs = right-hand point
+ Returns:       negative, zero, or positive comparison result
+ ******************************************************************/
+int cdisplib_selection_compare_points(CDispSelectionPoint lhs, CDispSelectionPoint rhs)
+{
+    if (lhs.line != rhs.line)
+    {
+        return lhs.line - rhs.line;
+    }
+    return lhs.column - rhs.column;
+}
+
+/*******************************************************************
+ Function:      cdisplib_selection_bounds
+ Description:   Convert anchor/focus selection into ordered bounds
+ Parameters:    display = display to query
+                bounds = returned ordered bounds
+ Returns:       none
+ ******************************************************************/
+void cdisplib_selection_bounds(const CDispDisplay *display, CDispSelectionBounds *bounds)
+{
+    if (bounds == NULL)
+    {
+        return;
+    }
+
+    memset(bounds, 0, sizeof(*bounds));
+    if (display == NULL || !display->selection.active)
+    {
+        return;
+    }
+
+    bounds->active = 1;
+    if (cdisplib_selection_compare_points(display->selection.anchor,
+                                          display->selection.focus) <= 0)
+    {
+        bounds->start = display->selection.anchor;
+        bounds->end = display->selection.focus;
+    }
+    else
+    {
+        bounds->start = display->selection.focus;
+        bounds->end = display->selection.anchor;
+    }
+}
+
+static int cdisplib_clamp_line(const CDispDisplay *display, int line)
+{
+    if (line < 0)
+    {
+        return 0;
+    }
+    if (display != NULL && line > display->line_count)
+    {
+        return display->line_count;
+    }
+    return line;
+}
+
+static int cdisplib_line_text_length(const CDispLine *line)
+{
+    const CDispTextRun *run;
+    int length;
+
+    length = 0;
+    run = line != NULL ? line->runs : NULL;
+    while (run != NULL)
+    {
+        length += (int) strlen(run->text);
+        run = run->next;
+    }
+
+    return length;
+}
+
+static int cdisplib_clamp_column(const CDispLine *line, int column, int is_end_marker)
+{
+    int max_column;
+
+    if (column < 0)
+    {
+        return 0;
+    }
+
+    if (line == NULL)
+    {
+        return is_end_marker ? 0 : 0;
+    }
+
+    max_column = cdisplib_line_text_length(line);
+    if (column > max_column)
+    {
+        return max_column;
+    }
+
+    return column;
+}
+
+/*******************************************************************
+ Function:      cdisplib_selection_point_from_xy
+ Description:   Convert relative co-ordinates into a selection point
+ Parameters:    display = display to query
+                x = relative x co-ordinate
+                y = relative y co-ordinate
+                point = returned selection point
+ Returns:       none
+ ******************************************************************/
+static void cdisplib_selection_point_from_xy(const CDispDisplay *display,
+                                             int x,
+                                             int y,
+                                             CDispSelectionPoint *point)
+{
+    CDispLine *line;
+
+    if (display == NULL || point == NULL)
+    {
+        return;
+    }
+
+    point->line = cdisplib_clamp_line(display,
+                                      (-(y + 8)) / display->font_metrics.line_height);
+    line = cdisplib_display_line_handle(display, point->line);
+    if (line == NULL && point->line == display->line_count)
+    {
+        line = display->tail;
+    }
+    point->column = cdisplib_x_to_column(display, line, x);
+}
+
+static void cdisplib_selection_redraw_range(CDispDisplay *display,
+                                            CDispSelectionBounds old_bounds,
+                                            CDispSelectionBounds new_bounds)
+{
+    int min_line;
+    int max_line;
+
+    if (display == NULL)
+    {
+        return;
+    }
+
+    min_line = old_bounds.active ? old_bounds.start.line : new_bounds.start.line;
+    if (new_bounds.active && new_bounds.start.line < min_line)
+    {
+        min_line = new_bounds.start.line;
+    }
+    max_line = old_bounds.active ? old_bounds.end.line : new_bounds.end.line;
+    if (new_bounds.active && new_bounds.end.line > max_line)
+    {
+        max_line = new_bounds.end.line;
+    }
+
+    cdisplib_force_redraw(display,
+                          0,
+                          -(max_line + 1) * display->font_metrics.line_height - CDISPLIB_WINDOW_BOTTOM_MARGIN,
+                          CDISPLIB_RIGHT_FILL_WIDTH,
+                          -min_line * display->font_metrics.line_height - 4);
+}
+
+static void cdisplib_start_selection_drag(CDispDisplay *display)
+{
+    wimp_wstate state;
+    wimp_winfo info;
+    wimp_mousestr pointer;
+    wimp_dragstr drag;
+    CDispAutoScrollBlock autoscroll;
+    int have_autoscroll;
+
+    if (display == NULL || display->window_handle == -1)
+    {
+        return;
+    }
+
+    if (wimp_get_wind_state(display->window_handle, &state) != NULL)
+    {
+        return;
+    }
+
+    info.w = display->window_handle;
+    if (wimp_get_wind_info(&info) != NULL)
+    {
+        return;
+    }
+
+    memset(&autoscroll, 0, sizeof(autoscroll));
+    autoscroll.window = display->window_handle;
+    autoscroll.pause_zone.x0 = display->font_metrics.max_char_width + 16;
+    autoscroll.pause_zone.x1 = display->font_metrics.max_char_width + 16;
+    autoscroll.pause_zone.y0 = display->font_metrics.line_height;
+    autoscroll.pause_zone.y1 = display->font_metrics.line_height;
+    autoscroll.pause_time = 0;
+    autoscroll.state_change_handler = 1;
+    autoscroll.workspace = 0;
+
+    have_autoscroll = _swix(CDISPLIB_WIMP_AUTOSCROLL,
+                            _INR(0, 1),
+                            3,
+                            &autoscroll) == NULL;
+
+    memset(&drag, 0, sizeof(drag));
+    drag.window = display->window_handle;
+    drag.type = wimp_USER_HIDDEN;
+
+    cdisplib_selection_drag_parent_box(have_autoscroll,
+                                       &state.o,
+                                       &info.info,
+                                       &drag.parent);
+
+    if (wimp_get_point_info(&pointer) != NULL)
+    {
+        return;
+    }
+
+    drag.box.x0 = pointer.x;
+    drag.box.x1 = pointer.x;
+    drag.box.y0 = pointer.y;
+    drag.box.y1 = pointer.y;
+    _swix(Wimp_DragBox, _INR(1, 3), &drag, 0x4B534154, 3);
+}
+
+/*******************************************************************
+ Function:      cdisplib_selection_drag_parent_box
+ Description:   Compute the drag parent box for selection drags
+ Parameters:    have_autoscroll = non-zero if Wimp_AutoScroll is active
+                open = current open-window state
+                info = current window information
+                parent = returned drag parent box
+ Returns:       none
+ ******************************************************************/
+void cdisplib_selection_drag_parent_box(int have_autoscroll,
+                                        const wimp_openstr *open,
+                                        const wimp_wind *info,
+                                        wimp_box *parent)
+{
+    if (open == NULL || info == NULL || parent == NULL)
+    {
+        return;
+    }
+
+    if (have_autoscroll)
+    {
+        *parent = open->box;
+        return;
+    }
+
+    if ((open->box.x1 - open->box.x0) >= (info->ex.x1 - info->ex.x0))
+    {
+        parent->x0 = open->box.x0;
+        parent->x1 = open->box.x1;
+    }
+    else
+    {
+        parent->x0 = -CDISPLIB_SELECTION_SCREEN_LIMIT;
+        parent->x1 = CDISPLIB_SELECTION_SCREEN_LIMIT;
+    }
+
+    if ((open->box.y1 - open->box.y0) >= (info->ex.y1 - info->ex.y0))
+    {
+        parent->y0 = open->box.y0;
+        parent->y1 = open->box.y1;
+    }
+    else
+    {
+        parent->y0 = -CDISPLIB_SELECTION_SCREEN_LIMIT;
+        parent->y1 = CDISPLIB_SELECTION_SCREEN_LIMIT;
+    }
+}
+
+/*******************************************************************
+ Function:      cdisplib_selection_choose_drag_end
+ Description:   Choose which end of the selection should be dragged
+ Parameters:    point = clicked point
+                anchor = current anchor point
+                focus = current focus point
+ Returns:       selection end to drag
+ ******************************************************************/
+cdisplib_selection_end cdisplib_selection_choose_drag_end(CDispSelectionPoint point,
+                                                          CDispSelectionPoint anchor,
+                                                          CDispSelectionPoint focus)
+{
+    int anchor_line_distance;
+    int focus_line_distance;
+    int anchor_column_distance;
+    int focus_column_distance;
+
+    anchor_line_distance = point.line - anchor.line;
+    if (anchor_line_distance < 0)
+    {
+        anchor_line_distance = -anchor_line_distance;
+    }
+
+    focus_line_distance = point.line - focus.line;
+    if (focus_line_distance < 0)
+    {
+        focus_line_distance = -focus_line_distance;
+    }
+
+    if (anchor_line_distance < focus_line_distance)
+    {
+        return cdisplib_selection_anchor_end;
+    }
+
+    if (anchor.line == focus.line)
+    {
+        anchor_column_distance = point.column - anchor.column;
+        if (anchor_column_distance < 0)
+        {
+            anchor_column_distance = -anchor_column_distance;
+        }
+
+        focus_column_distance = point.column - focus.column;
+        if (focus_column_distance < 0)
+        {
+            focus_column_distance = -focus_column_distance;
+        }
+
+        if (anchor_column_distance < focus_column_distance)
+        {
+            return cdisplib_selection_anchor_end;
+        }
+    }
+
+    return cdisplib_selection_focus_end;
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_rel_xy
+ Description:   Convert screen co-ordinates to relative work co-ordinates
+ Parameters:    display = display to query
+                x = in/out x position
+                y = in/out y position
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_rel_xy(const CDispDisplay *display, int *x, int *y)
+{
+    wimp_wstate state;
+
+    if (display == NULL || x == NULL || y == NULL || display->window_handle == -1)
+    {
+        return;
+    }
+
+    if (wimp_get_wind_state(display->window_handle, &state) != NULL)
+    {
+        return;
+    }
+
+    *y = *y - state.o.box.y1 + state.o.y;
+    *x = *x - state.o.box.x0 + state.o.x;
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_selection_clear
+ Description:   Remove the current selection
+ Parameters:    display = display to update
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_selection_clear(CDispDisplay *display)
+{
+    CDispSelectionBounds bounds;
+    int width;
+
+    if (display == NULL || !display->selection.active)
+    {
+        return;
+    }
+
+    cdisplib_selection_bounds(display, &bounds);
+    width = display->widest_width;
+    if (width < display->min_width_chars * display->font_metrics.max_char_width)
+    {
+        width = display->min_width_chars * display->font_metrics.max_char_width;
+    }
+
+    cdisplib_force_redraw(display,
+                          0,
+                          -(bounds.end.line + 1) * display->font_metrics.line_height - CDISPLIB_WINDOW_BOTTOM_MARGIN,
+                          width + 12 + display->font_metrics.left_margin,
+                          -bounds.start.line * display->font_metrics.line_height);
+    display->selection.active = 0;
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_selection_start
+ Description:   Start a selection operation
+ Parameters:    display = display to update
+                x = relative x
+                y = relative y
+                start_new_selection = non-zero to start afresh
+                user_drag = non-zero if this comes from a drag gesture
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_selection_start(CDispDisplay *display, int x, int y, int start_new_selection, int user_drag)
+{
+    CDispSelectionPoint point;
+
+    if (display == NULL)
+    {
+        return;
+    }
+
+    if (!display->selection.active)
+    {
+        start_new_selection = 1;
+    }
+
+    if (display->selection.active && start_new_selection)
+    {
+        cdisplib_display_selection_clear(display);
+    }
+    if (!start_new_selection)
+    {
+        cdisplib_display_selection_modify(display, x, y);
+    }
+
+    cdisplib_selection_point_from_xy(display, x, y, &point);
+
+    if (start_new_selection)
+    {
+        display->selection.active = 1;
+        display->selection.anchor = point;
+        display->selection.focus = point;
+        display->selection.dragging_end = cdisplib_selection_focus_end;
+    }
+
+    if (user_drag)
+    {
+        cdisplib_start_selection_drag(display);
+        cdisplib_global_drag_display = display;
+    }
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_selection_extend
+ Description:   Decide which end of the selection to drag
+ Parameters:    display = display to update
+                x = relative x
+                y = relative y
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_selection_extend(CDispDisplay *display, int x, int y)
+{
+    CDispSelectionPoint point;
+
+    if (display == NULL || !display->selection.active)
+    {
+        return;
+    }
+
+    cdisplib_selection_point_from_xy(display, x, y, &point);
+
+    display->selection.dragging_end = cdisplib_selection_choose_drag_end(point,
+                                                                         display->selection.anchor,
+                                                                         display->selection.focus);
+
+    cdisplib_display_selection_modify(display, x, y);
+    cdisplib_global_drag_display = NULL;
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_selection_modify
+ Description:   Modify the active end of the selection
+ Parameters:    display = display to update
+                x = relative x
+                y = relative y
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_selection_modify(CDispDisplay *display, int x, int y)
+{
+    CDispSelectionBounds old_bounds;
+    CDispSelectionBounds new_bounds;
+    CDispSelectionPoint point;
+
+    if (display == NULL || !display->selection.active)
+    {
+        return;
+    }
+
+    cdisplib_selection_bounds(display, &old_bounds);
+
+    cdisplib_selection_point_from_xy(display, x, y, &point);
+
+    if (display->selection.dragging_end == cdisplib_selection_anchor_end)
+    {
+        display->selection.anchor = point;
+    }
+    else
+    {
+        display->selection.focus = point;
+    }
+
+    cdisplib_selection_bounds(display, &new_bounds);
+    cdisplib_selection_redraw_range(display, old_bounds, new_bounds);
+    cdisplib_global_drag_display = display;
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_selection_end
+ Description:   End any active selection drag
+ Parameters:    display = ignored
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_selection_end(CDispDisplay *display)
+{
+    (void) display;
+    if (cdisplib_global_drag_display != NULL)
+    {
+        wimp_drag_box((wimp_dragstr *) -1);
+        _swix(CDISPLIB_WIMP_AUTOSCROLL, _IN(0), 0);
+        cdisplib_global_drag_display = NULL;
+    }
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_select_line_at
+ Description:   Select an entire line
+ Parameters:    display = display to update
+                x = relative x
+                y = relative y
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_select_line_at(CDispDisplay *display, int x, int y)
+{
+    (void) x;
+    cdisplib_display_selection_start(display, 0, y, 1, 0);
+    cdisplib_display_selection_modify(display, 0, y - display->font_metrics.line_height);
+    cdisplib_display_selection_end(display);
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_select_all
+ Description:   Select all text in the display
+ Parameters:    display = display to update
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_select_all(CDispDisplay *display)
+{
+    if (display == NULL)
+    {
+        return;
+    }
+
+    cdisplib_display_select_range(display, 0, 0, display->line_count, 0);
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_select_range
+ Description:   Select a range of text by line/column positions
+ Parameters:    display = display to update
+                start_line = starting line number
+                start_column = starting column
+                end_line = ending line number, or line_count for EOF
+                end_column = ending column
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_select_range(CDispDisplay *display,
+                                   int start_line,
+                                   int start_column,
+                                   int end_line,
+                                   int end_column)
+{
+    CDispSelectionBounds old_bounds;
+    CDispSelectionBounds new_bounds;
+    CDispLine *start_handle;
+    CDispLine *end_handle;
+
+    if (display == NULL)
+    {
+        return;
+    }
+
+    memset(&old_bounds, 0, sizeof(old_bounds));
+    if (display->selection.active)
+    {
+        cdisplib_selection_bounds(display, &old_bounds);
+    }
+
+    start_line = cdisplib_clamp_line(display, start_line);
+    end_line = cdisplib_clamp_line(display, end_line);
+    start_handle = cdisplib_display_line_handle(display, start_line);
+    end_handle = cdisplib_display_line_handle(display, end_line);
+    start_column = cdisplib_clamp_column(start_handle, start_column, 0);
+    end_column = cdisplib_clamp_column(end_handle, end_column, end_line == display->line_count);
+
+    if (display->selection.active)
+    {
+        cdisplib_display_selection_clear(display);
+        memset(&old_bounds, 0, sizeof(old_bounds));
+    }
+
+    display->selection.active = 1;
+    display->selection.anchor.line = start_line;
+    display->selection.anchor.column = start_column;
+    display->selection.focus.line = end_line;
+    display->selection.focus.column = end_column;
+    display->selection.dragging_end = cdisplib_selection_focus_end;
+
+    cdisplib_selection_bounds(display, &new_bounds);
+    cdisplib_selection_redraw_range(display, old_bounds, new_bounds);
+    cdisplib_global_drag_display = NULL;
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_read_selection
+ Description:   Read the current selection incrementally
+ Parameters:    display = display to read
+                line = in/out current line handle
+                line_number = in/out zero-based line number
+                column = in/out character column
+ Returns:       duplicated text chunk, or empty string at end of line
+ ******************************************************************/
+char *cdisplib_display_read_selection(CDispDisplay *display, CDispLine **line, int *line_number, int *column)
+{
+    CDispSelectionBounds bounds;
+    char *text;
+    int start_column;
+    int end_column;
+
+    if (display == NULL || line == NULL || line_number == NULL || column == NULL)
+    {
+        return cdisplib_strdup("");
+    }
+
+    cdisplib_selection_bounds(display, &bounds);
+    if (!bounds.active)
+    {
+        *line = NULL;
+        return cdisplib_strdup("");
+    }
+
+    if (*line == NULL)
+    {
+        *line_number = bounds.start.line;
+        *column = bounds.start.column;
+        *line = cdisplib_display_line_handle(display, *line_number);
+        if (*line == NULL)
+        {
+            return cdisplib_strdup("");
+        }
+    }
+
+    if (*line_number == bounds.end.line)
+    {
+        start_column = *column;
+        text = cdisplib_display_line_from_char(display, *line, column);
+        end_column = bounds.end.column - start_column;
+        if (end_column < 0)
+        {
+            end_column = 0;
+        }
+        if (text != NULL && (int) strlen(text) > end_column)
+        {
+            text[end_column] = '\0';
+        }
+        if (text != NULL && *text == '\0')
+        {
+            *line = NULL;
+        }
+        return text;
+    }
+
+    text = cdisplib_display_line_from_char(display, *line, column);
+    if (text == NULL || *text == '\0')
+    {
+        free(text);
+        *line = (*line)->next;
+        *line_number += 1;
+        *column = 0;
+        return cdisplib_strdup("");
+    }
+
+    return text;
+}

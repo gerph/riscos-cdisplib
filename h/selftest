@@ -1,0 +1,12 @@
+/*******************************************************************
+ * File:        selftest
+ * Purpose:     Non-Wimp self-test entry points for CDispLib
+ * Author:      Gerph
+ ******************************************************************/
+
+#ifndef CDISPLIB_SELFTEST_H
+#define CDISPLIB_SELFTEST_H
+
+int cdisplib_selftest_run(void);
+
+#endif

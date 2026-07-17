@@ -1,0 +1,1050 @@
+/*******************************************************************
+ * File:        selftest
+ * Purpose:     Non-Wimp self-tests for CDispLib core behaviour
+ * Author:      Gerph
+ ******************************************************************/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "VersionNum"
+#include "cdisplib.h"
+#include "cdisplib_internal.h"
+#include "selftest.h"
+#include "wimp.h"
+
+#define SELFTEST_TEXT_FILE "cdisplib_text"
+#define SELFTEST_SEL_FILE  "cdisplib_sel"
+#define SELFTEST_CLIP_FILE "cdisplib_clip"
+#define SELFTEST_TEXT_TYPE 0xFFF
+
+static int failures;
+
+static void selftest_fail(const char *message)
+{
+    printf("FAIL: %s\n", message);
+    failures += 1;
+}
+
+static void selftest_expect_true(int condition, const char *message)
+{
+    if (!condition)
+    {
+        selftest_fail(message);
+    }
+}
+
+static void selftest_expect_int(int actual, int expected, const char *message)
+{
+    if (actual != expected)
+    {
+        printf("FAIL: %s (got %d expected %d)\n", message, actual, expected);
+        failures += 1;
+    }
+}
+
+static void selftest_expect_string_owned(char *actual, const char *expected, const char *message)
+{
+    if (actual == NULL)
+    {
+        selftest_fail(message);
+        return;
+    }
+
+    if (strcmp(actual, expected) != 0)
+    {
+        printf("FAIL: %s (got '%s' expected '%s')\n", message, actual, expected);
+        failures += 1;
+    }
+    free(actual);
+}
+
+static char *selftest_read_file(const char *filename)
+{
+    FILE *in;
+    long size;
+    char *buffer;
+    size_t got;
+
+    in = fopen(filename, "r");
+    if (in == NULL)
+    {
+        return NULL;
+    }
+
+    if (fseek(in, 0, SEEK_END) != 0)
+    {
+        fclose(in);
+        return NULL;
+    }
+    size = ftell(in);
+    if (size < 0 || fseek(in, 0, SEEK_SET) != 0)
+    {
+        fclose(in);
+        return NULL;
+    }
+
+    buffer = malloc((size_t) size + 1);
+    if (buffer == NULL)
+    {
+        fclose(in);
+        return NULL;
+    }
+
+    got = fread(buffer, 1, (size_t) size, in);
+    fclose(in);
+    buffer[got] = '\0';
+    return buffer;
+}
+
+static void selftest_expect_file(const char *filename, const char *expected, const char *message)
+{
+    char *actual;
+
+    actual = selftest_read_file(filename);
+    if (actual == NULL)
+    {
+        selftest_fail(message);
+        return;
+    }
+
+    if (strcmp(actual, expected) != 0)
+    {
+        printf("FAIL: %s (got '%s' expected '%s')\n", message, actual, expected);
+        failures += 1;
+    }
+    free(actual);
+}
+
+static int selftest_read_filetype(const char *filename)
+{
+    _kernel_osfile_block block;
+    int object_type;
+
+    memset(&block, 0, sizeof(block));
+    object_type = _kernel_osfile(17, filename, &block);
+    if (object_type <= 0)
+    {
+        return -1;
+    }
+
+    if ((block.load & 0xFFF00000) != 0xFFF00000)
+    {
+        return -1;
+    }
+
+    return (block.load >> 8) & 0xFFF;
+}
+
+static void selftest_remove_file(const char *filename)
+{
+    remove(filename);
+}
+
+static void selftest_build_sample(CDispDisplay *display)
+{
+    CDispLine *first;
+
+    cdisplib_display_add(display, "alpha");
+    cdisplib_display_add(display, "gamma");
+    first = cdisplib_display_line_handle(display, 0);
+    cdisplib_display_add_at(display, first, "beta");
+    cdisplib_display_add_to_at(display, first, " one", -1, -1);
+    cdisplib_display_add_to(display, " tail", -1, -1);
+}
+
+static void selftest_check_line_navigation(CDispDisplay *display)
+{
+    CDispLine *line0;
+    CDispLine *line1;
+    CDispLine *line2;
+
+    line0 = cdisplib_display_line_handle(display, 0);
+    line1 = cdisplib_display_line_handle(display, 1);
+    line2 = cdisplib_display_line_handle(display, 2);
+
+    selftest_expect_true(line0 != NULL, "line 0 should exist");
+    selftest_expect_true(line1 != NULL, "line 1 should exist");
+    selftest_expect_true(line2 != NULL, "line 2 should exist");
+    selftest_expect_true(cdisplib_display_line_handle(display, -1) == line2,
+                         "line_handle(-1) should return the last line");
+    selftest_expect_true(cdisplib_display_line_handle(display, 3) == line2,
+                         "line_handle(line_count) should return the last line");
+    selftest_expect_true(cdisplib_display_line_handle(display, 99) == line2,
+                         "line_handle(past line_count) should return the last line");
+    selftest_expect_true(cdisplib_display_next_line(line0) == line1, "line 0 next should be line 1");
+    selftest_expect_true(cdisplib_display_prev_line(line2) == line1, "line 2 previous should be line 1");
+    selftest_expect_int(cdisplib_display_line_number_from_handle(display, line2), 2, "line number from handle");
+    selftest_expect_true(cdisplib_display_line_from_y(display, 0) == NULL,
+                         "line_from_y should return NULL above the first line");
+    selftest_expect_true(cdisplib_display_line_from_y(display, -200) == NULL,
+                         "line_from_y should return NULL below the last line");
+}
+
+static void selftest_check_text_accessors(CDispDisplay *display)
+{
+    CDispLine *line0;
+    CDispLine *line2;
+    CDispDisplay *word_display;
+    CDispLine *word_line;
+    int x;
+    int column;
+    int bg;
+    int fg;
+    char *word;
+
+    line0 = cdisplib_display_line_handle(display, 0);
+    line2 = cdisplib_display_line_handle(display, 2);
+
+    x = 4;
+    selftest_expect_string_owned(cdisplib_display_line_from(display, line0, &x),
+                                 "alpha",
+                                 "line_from should return the remainder of the current run");
+    selftest_expect_int(x,
+                        4 + (5 * 16),
+                        "line_from should advance x to the end of the current run");
+
+    x = 4 + (3 * 16);
+    selftest_expect_string_owned(cdisplib_display_line_to(display, line0, &x),
+                                 "alp",
+                                 "line_to should return a substring within the current run");
+    selftest_expect_int(x,
+                        4 + (5 * 16),
+                        "line_to should advance x to the end of the current run");
+
+    column = 6;
+    selftest_expect_string_owned(cdisplib_display_line_from_char(display, line0, &column),
+                                 "one",
+                                 "line_from_char should return the remainder of the current run");
+    selftest_expect_int(column,
+                        9,
+                        "line_from_char should advance to the end of the current run");
+
+    x = 4 + (6 * 16);
+    bg = 1234;
+    fg = 1234;
+    selftest_expect_string_owned(cdisplib_display_line_from_start(display, line0, &x, &bg, &fg),
+                                 " one",
+                                 "line_from_start should return the run covering x");
+    selftest_expect_int(bg, -1, "line_from_start background should be default");
+    selftest_expect_int(fg, -1, "line_from_start foreground should be default");
+
+    x = 4 + (64 * 16);
+    selftest_expect_string_owned(cdisplib_display_line_from_start(display, line0, &x, &bg, &fg),
+                                 "",
+                                 "line_from_start should return empty past the end of the line");
+    selftest_expect_int(x,
+                        4 + (64 * 16) + 4,
+                        "line_from_start should still advance x by four when no run is found");
+
+    selftest_expect_string_owned(cdisplib_display_word_at(display, line0, 4 + (7 * 16)),
+                                 "one",
+                                 "word_at should identify the word at x");
+
+    selftest_expect_int(cdisplib_display_x_to_column(display, line0, 4 + (7 * 16)),
+                        7,
+                        "x_to_column should convert x into a character index");
+    selftest_expect_int(cdisplib_display_column_to_x(display, line0, 7),
+                        4 + (7 * 16),
+                        "column_to_x should convert a character index into x");
+
+    x = 4;
+    selftest_expect_string_owned(cdisplib_display_line_from(display, line2, &x),
+                                 "gamma",
+                                 "line_from should stop at the end of the current run");
+
+    word_display = cdisplib_display_new("word test");
+    selftest_expect_true(word_display != NULL, "word test display should be created");
+    if (word_display != NULL)
+    {
+        cdisplib_display_add(word_display, "left");
+        cdisplib_display_add_to(word_display, "right", -1, -1);
+        word_line = cdisplib_display_line_handle(word_display, 0);
+        word = cdisplib_display_word_at(word_display, word_line, 4 + (5 * 16));
+        selftest_expect_string_owned(word,
+                                     "right",
+                                     "word_at should not cross a text-run boundary");
+        cdisplib_display_kill(&word_display);
+    }
+}
+
+static void selftest_check_selection(CDispDisplay *display)
+{
+    CDispLine *line;
+    int line_number;
+    int column;
+    char *part;
+
+    cdisplib_display_select_range(display, 0, 1, 1, 3);
+    selftest_expect_true(cdisplib_display_has_selection(display), "selection should be active");
+
+    line = NULL;
+    line_number = 0;
+    column = 0;
+
+    part = cdisplib_display_read_selection(display, &line, &line_number, &column);
+    selftest_expect_string_owned(part, "lpha", "first selection fragment");
+
+    part = cdisplib_display_read_selection(display, &line, &line_number, &column);
+    selftest_expect_string_owned(part, " one", "second selection fragment should continue the same line");
+
+    part = cdisplib_display_read_selection(display, &line, &line_number, &column);
+    selftest_expect_string_owned(part, "", "selection line break marker");
+
+    part = cdisplib_display_read_selection(display, &line, &line_number, &column);
+    selftest_expect_string_owned(part, "bet", "final selection fragment");
+
+    part = cdisplib_display_read_selection(display, &line, &line_number, &column);
+    selftest_expect_string_owned(part, "", "selection should terminate with a final empty fragment");
+    selftest_expect_true(line == NULL, "selection iterator should finish after the terminating empty fragment");
+
+    cdisplib_display_selection_clear(display);
+    selftest_expect_true(!cdisplib_display_has_selection(display), "selection should clear");
+
+    cdisplib_display_select_all(display);
+    selftest_expect_true(cdisplib_display_has_selection(display), "select_all should activate selection");
+
+    cdisplib_display_selection_clear(display);
+    cdisplib_display_selection_start(display, 0, 0, 1, 0);
+    cdisplib_display_selection_modify(display,
+                                      4 + (7 * 16),
+                                      -display->font_metrics.line_height * (display->line_count + 1));
+    selftest_expect_int(display->selection.focus.line,
+                        display->line_count,
+                        "below-bottom selection should keep the focus line at EOF");
+    selftest_expect_int(display->selection.focus.column,
+                        7,
+                        "below-bottom selection should resolve the EOF column from the last line");
+    line = NULL;
+    line_number = 0;
+    column = 0;
+
+    part = cdisplib_display_read_selection(display, &line, &line_number, &column);
+    selftest_expect_string_owned(part, "alpha", "below-bottom selection should start with the first run");
+
+    part = cdisplib_display_read_selection(display, &line, &line_number, &column);
+    selftest_expect_string_owned(part, " one", "below-bottom selection should continue the first line");
+
+    part = cdisplib_display_read_selection(display, &line, &line_number, &column);
+    selftest_expect_string_owned(part, "", "below-bottom selection should emit a line break after line 0");
+
+    part = cdisplib_display_read_selection(display, &line, &line_number, &column);
+    selftest_expect_string_owned(part, "beta", "below-bottom selection should include the middle line");
+
+    part = cdisplib_display_read_selection(display, &line, &line_number, &column);
+    selftest_expect_string_owned(part, "", "below-bottom selection should emit a line break after line 1");
+
+    part = cdisplib_display_read_selection(display, &line, &line_number, &column);
+    selftest_expect_string_owned(part, "gamma", "below-bottom selection should include the first run of the last line");
+
+    part = cdisplib_display_read_selection(display, &line, &line_number, &column);
+    selftest_expect_string_owned(part, " tail", "below-bottom selection should still include the full last line in iteration");
+
+    part = cdisplib_display_read_selection(display, &line, &line_number, &column);
+    selftest_expect_string_owned(part, "", "below-bottom selection should terminate with an empty fragment");
+    selftest_expect_true(line == NULL, "below-bottom selection iterator should finish cleanly");
+}
+
+static void selftest_check_file_output(CDispDisplay *display)
+{
+    cdisplib_display_save_text(display, SELFTEST_TEXT_FILE);
+    selftest_expect_file(SELFTEST_TEXT_FILE,
+                         "alpha one\nbeta\ngamma tail\n",
+                         "save_text should write the full display");
+    selftest_expect_int(selftest_read_filetype(SELFTEST_TEXT_FILE),
+                        SELFTEST_TEXT_TYPE,
+                        "save_text should set the text filetype");
+
+    cdisplib_display_save_selection(display, SELFTEST_SEL_FILE);
+    selftest_expect_file(SELFTEST_SEL_FILE,
+                         "alpha one\nbeta\ngamma tail",
+                         "save_selection should write the selected text");
+    selftest_expect_int(selftest_read_filetype(SELFTEST_SEL_FILE),
+                        SELFTEST_TEXT_TYPE,
+                        "save_selection should set the text filetype");
+
+    selftest_remove_file(SELFTEST_TEXT_FILE);
+    selftest_remove_file(SELFTEST_SEL_FILE);
+}
+
+static void selftest_check_mutation(CDispDisplay *display)
+{
+    CDispLine *line1;
+    int x;
+
+    line1 = cdisplib_display_line_handle(display, 1);
+    cdisplib_display_wipe_line(display, line1);
+    x = 4;
+    selftest_expect_string_owned(cdisplib_display_line_from(display, line1, &x),
+                                 "",
+                                 "wiped line should be empty");
+
+    cdisplib_display_delete_line(display, line1);
+    selftest_expect_int(cdisplib_display_lines(display), 2, "delete_line should reduce line count");
+
+    cdisplib_display_clear(display);
+    selftest_expect_int(cdisplib_display_lines(display), 0, "clear should remove all lines");
+}
+
+static void selftest_check_menu_choices(CDispDisplay *display)
+{
+    const char *font_name;
+    int size_points;
+    int select_all_choice[2];
+    int clear_selection_choice[2];
+    int clear_choice[2];
+    int size_choice[3];
+    int system_font_choice[3];
+
+    select_all_choice[0] = 2;
+    select_all_choice[1] = -1;
+    clear_selection_choice[0] = 3;
+    clear_selection_choice[1] = -1;
+    clear_choice[0] = 0;
+    clear_choice[1] = -1;
+    size_choice[0] = 1;
+    size_choice[1] = 6;
+    size_choice[2] = -1;
+    system_font_choice[0] = 0;
+    system_font_choice[1] = 0;
+    system_font_choice[2] = -1;
+
+    cdisplib_display_add(display, "menu test");
+    cdisplib_display_edit_menu_choice(display, select_all_choice);
+    selftest_expect_true(cdisplib_display_has_selection(display), "edit menu select-all should activate selection");
+
+    cdisplib_display_edit_menu_choice(display, clear_selection_choice);
+    selftest_expect_true(!cdisplib_display_has_selection(display), "edit menu clear-selection should clear selection");
+
+    cdisplib_display_menu_choice(display, size_choice);
+    cdisplib_display_get_font(display, &font_name, &size_points);
+    selftest_expect_int(size_points,
+                        18,
+                        "display menu size choice should preserve size when using system font");
+
+    cdisplib_display_menu_choice(display, system_font_choice);
+    cdisplib_display_get_font(display, &font_name, &size_points);
+    selftest_expect_true(font_name == NULL || *font_name == '\0', "display menu system font choice should clear font name");
+
+    cdisplib_display_edit_menu_choice(display, clear_choice);
+    selftest_expect_int(cdisplib_display_lines(display), 0, "edit menu clear should empty the display");
+}
+
+static void selftest_check_menu_construction(void)
+{
+    const char *extras[2];
+    wimp_menustr *menu;
+    wimp_menustr *menu_from_append;
+    wimp_menuitem *items;
+
+    extras[0] = "Extra one";
+    extras[1] = "Extra two";
+    menu = cdisplib_display_menu_with_extras(extras, 2);
+    selftest_expect_true(menu != NULL, "display menu with extras should be created");
+    selftest_expect_int(cdisplib_display_menu_extra_base(), 2, "extra menu base should follow built-ins");
+
+    if (menu != NULL)
+    {
+        items = (wimp_menuitem *) (menu + 1);
+        selftest_expect_true(items[2].data.indirecttext.buffer != NULL, "first extra menu label should exist");
+        selftest_expect_true(items[3].data.indirecttext.buffer != NULL, "second extra menu label should exist");
+        selftest_expect_true(strcmp(items[2].data.indirecttext.buffer, "Extra one") == 0, "first extra menu label text");
+        selftest_expect_true(strcmp(items[3].data.indirecttext.buffer, "Extra two") == 0, "second extra menu label text");
+    }
+
+    menu_from_append = cdisplib_display_menu_with_append("|Extra one|Extra two]D");
+    selftest_expect_true(menu_from_append != NULL, "display menu with BASIC-style append should be created");
+    if (menu_from_append != NULL)
+    {
+        items = (wimp_menuitem *) (menu_from_append + 1);
+        selftest_expect_true(strcmp(items[2].data.indirecttext.buffer, "Extra one") == 0,
+                             "first BASIC-style extra label text");
+        selftest_expect_true(strcmp(items[3].data.indirecttext.buffer, "Extra two") == 0,
+                             "second BASIC-style extra label text");
+    }
+}
+
+static void selftest_check_menu_warning_target(void)
+{
+    int selection[3];
+
+    selftest_expect_int(cdisplib_display_menu_warning_target(NULL),
+                        cdisplib_menu_warning_none,
+                        "NULL warning path should not open a submenu");
+
+    selection[0] = -1;
+    selection[1] = -1;
+    selftest_expect_int(cdisplib_display_menu_warning_target(selection),
+                        cdisplib_menu_warning_display,
+                        "top-level menu warning should reopen the display menu");
+
+    selection[0] = 0;
+    selection[1] = -1;
+    selftest_expect_int(cdisplib_display_menu_warning_target(selection),
+                        cdisplib_menu_warning_font,
+                        "font menu warning should target the font submenu");
+
+    selection[0] = 1;
+    selection[1] = -1;
+    selftest_expect_int(cdisplib_display_menu_warning_target(selection),
+                        cdisplib_menu_warning_size,
+                        "size menu warning should target the size submenu");
+
+    selection[0] = 2;
+    selection[1] = -1;
+    selftest_expect_int(cdisplib_display_menu_warning_target(selection),
+                        cdisplib_menu_warning_none,
+                        "extra-item warning should not open a built-in submenu");
+}
+
+static void selftest_check_metadata(CDispDisplay *display)
+{
+    const char *font_name;
+    int size_points;
+    int old_line_height;
+    int old_max_char_width;
+    CDispLine *line;
+    int x;
+
+    cdisplib_display_colours(display, 3, 1);
+    cdisplib_display_size(display, 10, 8);
+    cdisplib_display_set_private_word(display, 12345);
+    cdisplib_display_set_font(display, "", -1);
+    cdisplib_display_get_font(display, &font_name, &size_points);
+
+    selftest_expect_int(cdisplib_display_get_private_word(display), 12345, "private word round-trip");
+    selftest_expect_true(font_name == NULL || *font_name == '\0', "system font should report empty name");
+    selftest_expect_int(size_points, 12, "default size should remain 12 points");
+
+    cdisplib_display_set_font(display, "Homerton.Medium", 18);
+    cdisplib_display_get_font(display, &font_name, &size_points);
+    selftest_expect_int(size_points, 18, "named font should update point size");
+    old_line_height = display->font_metrics.line_height;
+    old_max_char_width = display->font_metrics.max_char_width;
+
+    cdisplib_display_set_font(display, "NoSuch.Font.Name", -1);
+    selftest_expect_int(display->font_metrics.handle,
+                        -1,
+                        "invalid font should leave no live font handle");
+    selftest_expect_int(display->font_metrics.line_height,
+                        old_line_height,
+                        "invalid font should preserve the previous cached line height");
+    selftest_expect_int(display->font_metrics.max_char_width,
+                        old_max_char_width,
+                        "invalid font should preserve the previous cached max character width");
+    selftest_expect_int(cdisplib_measure_text(display, "abc"),
+                        1,
+                        "invalid named font should collapse measured run width to one OS unit");
+    cdisplib_display_add(display, "probe");
+    line = cdisplib_display_line_handle(display, 0);
+    selftest_expect_true(line != NULL, "metadata test should have a line to probe after invalid font selection");
+    if (line != NULL)
+    {
+        x = 4;
+        selftest_expect_string_owned(cdisplib_display_line_from(display, line, &x),
+                                     "probe",
+                                     "metadata test should probe the expected line text");
+    }
+    cdisplib_display_clear(display);
+
+    cdisplib_display_set_font(display, "", 24);
+    cdisplib_display_get_font(display, &font_name, &size_points);
+    selftest_expect_true(font_name == NULL || *font_name == '\0',
+                         "switching back to system font should clear font name");
+    selftest_expect_int(size_points,
+                        18,
+                        "switching to system font should preserve previous point size");
+}
+
+static void selftest_check_render(CDispDisplay *display)
+{
+    CDispRenderBox clip;
+    int work_left;
+    int work_top;
+
+    work_left = 64;
+    work_top = 512;
+    clip.x0 = work_left;
+    clip.y0 = work_top - (cdisplib_display_lines(display) * 36) - 32;
+    clip.x1 = work_left + 1024;
+    clip.y1 = work_top + 16;
+
+    cdisplib_display_selection_clear(display);
+    selftest_expect_true(!cdisplib_display_has_selection(display),
+                         "render test should start without a selection");
+
+    cdisplib_display_render(display, work_left, work_top, &clip);
+
+    cdisplib_display_select_range(display, 0, 1, 1, 3);
+    selftest_expect_true(cdisplib_display_has_selection(display),
+                         "programmatic selection should activate highlighting");
+
+    cdisplib_display_render(display, work_left, work_top, &clip);
+
+    cdisplib_display_select_all(display);
+    selftest_expect_true(cdisplib_display_has_selection(display),
+                         "select_all should keep a programmatic selection active for rendering");
+
+    cdisplib_display_render(display, work_left, work_top, &clip);
+}
+
+static void selftest_check_clipboard_messages(CDispDisplay *display)
+{
+    wimp_msgstr message;
+
+    (void) display;
+    cdisplib_set_task_handle(99);
+    free(cdisplib_global_clipboard);
+    cdisplib_global_clipboard = cdisplib_strdup("alpha");
+    cdisplib_global_clipboard_size = 5;
+    selftest_expect_true(cdisplib_global_clipboard != NULL,
+                         "clipboard buffer should be populated for message tests");
+
+    memset(&message, 0, sizeof(message));
+    message.hdr.action = wimp_MCLAIMENTITY;
+    message.hdr.task = 99;
+    message.data.claimentity.flags = wimp_CECLIPBOARD;
+    selftest_expect_true(!cdisplib_display_clipboard_message(&message),
+                         "ClaimEntity from the current task should be ignored");
+    selftest_expect_true(cdisplib_global_clipboard != NULL,
+                         "self ClaimEntity should not release the clipboard");
+
+    message.hdr.task = 100;
+    selftest_expect_true(cdisplib_display_clipboard_message(&message),
+                         "ClaimEntity from another task should release the clipboard");
+    selftest_expect_true(cdisplib_global_clipboard == NULL,
+                         "foreign ClaimEntity should clear the clipboard");
+
+    free(cdisplib_global_clipboard);
+    cdisplib_global_clipboard = cdisplib_strdup("alpha");
+    cdisplib_global_clipboard_size = 5;
+    cdisplib_global_clipboard_save_ref = 321;
+    selftest_expect_true(cdisplib_global_clipboard != NULL,
+                         "clipboard buffer should be repopulated for DataSaveAck");
+
+    selftest_expect_true(cdisplib_save_clipboard_file(SELFTEST_CLIP_FILE),
+                         "clipboard save helper should write the clipboard file");
+    selftest_expect_file(SELFTEST_CLIP_FILE,
+                         "alpha",
+                         "clipboard save helper should write the clipboard contents");
+    selftest_expect_int(selftest_read_filetype(SELFTEST_CLIP_FILE),
+                        SELFTEST_TEXT_TYPE,
+                        "clipboard save helper should preserve the text filetype");
+    selftest_remove_file(SELFTEST_CLIP_FILE);
+}
+
+static void selftest_check_release_entity_message(void)
+{
+    wimp_msgstr message;
+
+    memset(&message, 0x5A, sizeof(message));
+    cdisplib_prepare_release_entity_message(&message);
+
+    selftest_expect_int(message.hdr.size,
+                        24,
+                        "release-entity message should use the clipboard message size");
+    selftest_expect_int(message.hdr.action,
+                        wimp_MRELEASEENTITY,
+                        "release-entity message should use the release action");
+    selftest_expect_int(message.data.claimentity.flags,
+                        wimp_CECLIPBOARD,
+                        "release-entity message should release the clipboard entity");
+}
+
+static void selftest_check_clipboard_datasave_message(void)
+{
+    wimp_msgstr message;
+
+    memset(&message, 0x5A, sizeof(message));
+    cdisplib_prepare_clipboard_datasave_message(&message, 42, 77, 1234);
+
+    selftest_expect_int(message.hdr.size,
+                        56,
+                        "clipboard DataSave message should include the leafname size");
+    selftest_expect_int(message.hdr.action,
+                        wimp_MDATASAVE,
+                        "clipboard DataSave message should use the DataSave action");
+    selftest_expect_int(message.hdr.task,
+                        42,
+                        "clipboard DataSave message should preserve the destination task");
+    selftest_expect_int(message.hdr.your_ref,
+                        77,
+                        "clipboard DataSave message should preserve the request reference");
+    selftest_expect_int(message.data.datasave.estsize,
+                        1234,
+                        "clipboard DataSave message should expose the estimated clipboard size");
+    selftest_expect_int(message.data.datasave.type,
+                        0xFFF,
+                        "clipboard DataSave message should advertise text filetype");
+    selftest_expect_true(strcmp(message.data.datasave.leaf, "Clipboard") == 0,
+                         "clipboard DataSave message should use the Clipboard leafname");
+}
+
+static void selftest_check_font_palette_resolution(CDispDisplay *display)
+{
+    int resolved;
+
+    display->default_background = -1;
+    display->default_foreground = 7;
+    cdisplib_global_palette[3] = 0x03030310;
+    cdisplib_global_palette[7] = 0x07070710;
+    selftest_expect_int(cdisplib_global_palette[7],
+                        0x07070710,
+                        "self-test setup should seed the cached Wimp palette");
+    cdisplib_display_set_palette(display, 0, 3);
+    cdisplib_display_set_palette(display, 1, (0 << 8) | 0x11);
+
+    resolved = cdisplib_resolve_font_palette_entry(display,
+                                                   (1 << 8) | 0x11,
+                                                   display->default_background,
+                                                   1);
+    selftest_expect_int(resolved,
+                        0x03030310,
+                        "font background should resolve chained private palette entries");
+
+    resolved = cdisplib_resolve_font_palette_entry(display,
+                                                   (99 << 8) | 0x11,
+                                                   display->default_foreground,
+                                                   0);
+    selftest_expect_int(resolved,
+                        0x07070710,
+                        "font foreground should fall back to the default foreground when private palette resolution fails");
+
+    resolved = cdisplib_resolve_font_palette_entry(display,
+                                                   -1,
+                                                   display->default_background,
+                                                   1);
+    selftest_expect_int(resolved,
+                        0xDDDDDD10,
+                        "font background should use the default mottled fallback when no background is defined");
+}
+
+static void selftest_check_reopen_bottom_adjust(void)
+{
+    wimp_openstr current_open;
+    wimp_wind current_info;
+    wimp_openstr requested_open;
+
+    memset(&current_open, 0, sizeof(current_open));
+    memset(&current_info, 0, sizeof(current_info));
+    memset(&requested_open, 0, sizeof(requested_open));
+
+    current_open.box.y0 = 600;
+    current_open.box.y1 = 900;
+    current_open.y = -100;
+    current_info.ex.y0 = -400;
+    current_info.ex.y1 = 0;
+
+    requested_open = current_open;
+    requested_open.box.y0 = 500;
+    requested_open.box.y1 = 900;
+    requested_open.y = current_open.y;
+
+    cdisplib_adjust_reopen_for_bottom(&current_open, &current_info, &requested_open);
+    selftest_expect_int(requested_open.y,
+                        0,
+                        "reopen should keep the window bottom aligned when already at bottom");
+
+    requested_open = current_open;
+    requested_open.box.y0 = 500;
+    requested_open.box.y1 = 900;
+    requested_open.y = current_open.y - 16;
+
+    cdisplib_adjust_reopen_for_bottom(&current_open, &current_info, &requested_open);
+    selftest_expect_int(requested_open.y,
+                        current_open.y - 16,
+                        "reopen should not force bottom when the request changes scroll position");
+
+    current_open.y = -80;
+    requested_open = current_open;
+    requested_open.box.y0 = 500;
+    requested_open.box.y1 = 900;
+
+    cdisplib_adjust_reopen_for_bottom(&current_open, &current_info, &requested_open);
+    selftest_expect_int(requested_open.y,
+                        -80,
+                        "reopen should not force bottom when the old view was not at the bottom");
+}
+
+static void selftest_check_resize_adjust(void)
+{
+    CDispDisplay display;
+    wimp_openstr current_open;
+    wimp_wind current_info;
+    wimp_box new_extent;
+    wimp_openstr adjusted_open;
+    int moved;
+
+    memset(&display, 0, sizeof(display));
+    memset(&current_open, 0, sizeof(current_open));
+    memset(&current_info, 0, sizeof(current_info));
+    memset(&new_extent, 0, sizeof(new_extent));
+    memset(&adjusted_open, 0, sizeof(adjusted_open));
+
+    display.line_count = 20;
+    display.natural_height_lines = 12;
+    display.font_metrics.line_height = 36;
+
+    current_open.box.x0 = 10;
+    current_open.box.x1 = 210;
+    current_open.box.y0 = 300;
+    current_open.box.y1 = 700;
+    current_open.y = -200;
+    current_info.ex.x0 = 0;
+    current_info.ex.x1 = 180;
+    current_info.ex.y0 = -600;
+    current_info.ex.y1 = 0;
+
+    new_extent.x0 = 0;
+    new_extent.x1 = 260;
+    new_extent.y0 = -728;
+    new_extent.y1 = 0;
+
+    cdisplib_adjust_resize_open(&display,
+                                1,
+                                &current_open,
+                                &current_info,
+                                &new_extent,
+                                &adjusted_open,
+                                &moved);
+    selftest_expect_int(adjusted_open.box.x1,
+                        270,
+                        "resize should grow a full-width window to the new extent width");
+    selftest_expect_int(adjusted_open.y,
+                        -328,
+                        "resize should keep a bottom-aligned view at the bottom");
+    selftest_expect_true(moved != 0,
+                         "resize should report a move when a full-width view tracks the new extent");
+
+    current_open.box.x0 = 10;
+    current_open.box.x1 = 110;
+    current_open.box.y0 = 500;
+    current_open.box.y1 = 700;
+    current_open.y = -120;
+    current_info.ex.x1 = 260;
+    current_info.ex.y0 = -728;
+    moved = 0;
+
+    cdisplib_adjust_resize_open(&display,
+                                1,
+                                &current_open,
+                                &current_info,
+                                &new_extent,
+                                &adjusted_open,
+                                &moved);
+    selftest_expect_int(adjusted_open.box.x1,
+                        110,
+                        "resize should not widen a non-full-width window");
+    selftest_expect_int(adjusted_open.y,
+                        -120,
+                        "resize should not force bottom when the view was not at the bottom");
+    selftest_expect_int(moved,
+                        0,
+                        "resize should not report movement for an unchanged partial view");
+}
+
+static void selftest_check_fullsize_adjust(void)
+{
+    CDispDisplay display;
+    wimp_openstr current_open;
+    wimp_openstr adjusted_open;
+
+    memset(&display, 0, sizeof(display));
+    memset(&current_open, 0, sizeof(current_open));
+    memset(&adjusted_open, 0, sizeof(adjusted_open));
+
+    display.line_count = 3;
+    display.widest_width = 120;
+    display.font_metrics.line_height = 36;
+
+    current_open.box.x0 = 64;
+    current_open.box.y0 = 300;
+    current_open.box.x1 = 164;
+    current_open.box.y1 = 500;
+
+    cdisplib_adjust_fullsize_open(&display, &current_open, &adjusted_open);
+    selftest_expect_int(adjusted_open.box.x0,
+                        64,
+                        "fullsize should preserve the left edge");
+    selftest_expect_int(adjusted_open.box.x1,
+                        64 + 120 + 12,
+                        "fullsize should widen to the display content width");
+    selftest_expect_int(adjusted_open.box.y1,
+                        500,
+                        "fullsize should preserve the top edge");
+    selftest_expect_int(adjusted_open.box.y0,
+                        500 - (3 * 36) - CDISPLIB_WINDOW_BOTTOM_MARGIN,
+                        "fullsize should grow to the full content height");
+}
+
+static void selftest_check_recreated_window_info(void)
+{
+    wimp_wind current_info;
+    wimp_wind recreated_info;
+    char old_title[16];
+
+    memset(&current_info, 0, sizeof(current_info));
+    memset(&recreated_info, 0, sizeof(recreated_info));
+    strcpy(old_title, "Old");
+
+    current_info.box.x0 = 10;
+    current_info.box.y0 = 20;
+    current_info.box.x1 = 300;
+    current_info.box.y1 = 400;
+    current_info.scx = 7;
+    current_info.scy = -33;
+    current_info.behind = -1;
+    current_info.flags = (wimp_wflags) (wimp_WNEW | wimp_WTITLE | wimp_WSIZE);
+    current_info.ex.x0 = 1;
+    current_info.ex.y0 = -600;
+    current_info.ex.x1 = 250;
+    current_info.ex.y1 = 2;
+    current_info.titleflags = (wimp_iconflags) 0x13D;
+    current_info.workflags = (wimp_iconflags) 0xA000;
+    current_info.minsize = 12345;
+    current_info.title.indirecttext.buffer = old_title;
+    current_info.title.indirecttext.validstring = old_title;
+    current_info.title.indirecttext.bufflen = 16;
+    current_info.nicons = 0;
+
+    cdisplib_prepare_recreated_window(&current_info, "New title", &recreated_info);
+    selftest_expect_int(recreated_info.box.x0,
+                        10,
+                        "recreated window should preserve the old visible box");
+    selftest_expect_int(recreated_info.ex.y0,
+                        -600,
+                        "recreated window should preserve the old extent");
+    selftest_expect_int(recreated_info.minsize,
+                        12345,
+                        "recreated window should preserve the old minimum size");
+    selftest_expect_true(recreated_info.title.indirecttext.buffer != NULL,
+                         "recreated window should provide a title buffer");
+    selftest_expect_true(strcmp(recreated_info.title.indirecttext.buffer, "New title") == 0,
+                         "recreated window should use the new title text");
+    selftest_expect_true(recreated_info.title.indirecttext.validstring == NULL,
+                         "recreated window should clear the title validation string");
+    selftest_expect_int(recreated_info.title.indirecttext.bufflen,
+                        9,
+                        "recreated window should refresh the title buffer length");
+}
+
+static void selftest_check_selection_drag_parent_box(void)
+{
+    wimp_openstr open;
+    wimp_wind info;
+    wimp_box parent;
+
+    memset(&open, 0, sizeof(open));
+    memset(&info, 0, sizeof(info));
+    memset(&parent, 0, sizeof(parent));
+
+    open.box.x0 = 100;
+    open.box.x1 = 300;
+    open.box.y0 = 200;
+    open.box.y1 = 500;
+    info.ex.x0 = 0;
+    info.ex.x1 = 150;
+    info.ex.y0 = 0;
+    info.ex.y1 = 250;
+
+    cdisplib_selection_drag_parent_box(1, &open, &info, &parent);
+    selftest_expect_int(parent.x0, 100, "autoscroll drag parent should use the visible x0");
+    selftest_expect_int(parent.y1, 500, "autoscroll drag parent should use the visible y1");
+
+    info.ex.x1 = 400;
+    info.ex.y1 = 700;
+    cdisplib_selection_drag_parent_box(0, &open, &info, &parent);
+    selftest_expect_int(parent.x0,
+                        -CDISPLIB_SELECTION_SCREEN_LIMIT,
+                        "partial-width drag parent should allow free horizontal movement");
+    selftest_expect_int(parent.y0,
+                        -CDISPLIB_SELECTION_SCREEN_LIMIT,
+                        "partial-height drag parent should allow free vertical movement");
+
+    info.ex.x1 = 200;
+    info.ex.y1 = 300;
+    cdisplib_selection_drag_parent_box(0, &open, &info, &parent);
+    selftest_expect_int(parent.x0, 100, "full-width drag parent should clamp x0 to the visible box");
+    selftest_expect_int(parent.y0, 200, "full-height drag parent should clamp y0 to the visible box");
+}
+
+static void selftest_check_selection_extend_choice(void)
+{
+    CDispSelectionPoint point;
+    CDispSelectionPoint anchor;
+    CDispSelectionPoint focus;
+
+    anchor.line = 2;
+    anchor.column = 10;
+    focus.line = 4;
+    focus.column = 2;
+    point.line = 3;
+    point.column = 9;
+
+    selftest_expect_int(cdisplib_selection_choose_drag_end(point, anchor, focus),
+                        cdisplib_selection_focus_end,
+                        "multi-line extend should prefer the focus end when line distances tie");
+
+    anchor.line = 5;
+    anchor.column = 3;
+    focus.line = 5;
+    focus.column = 9;
+    point.line = 5;
+    point.column = 4;
+
+    selftest_expect_int(cdisplib_selection_choose_drag_end(point, anchor, focus),
+                        cdisplib_selection_anchor_end,
+                        "single-line extend should use column distance to choose the nearer end");
+}
+
+int cdisplib_selftest_run(void)
+{
+    CDispDisplay *display;
+
+    failures = 0;
+    printf("Running CDispLib self-test\n");
+    selftest_expect_true(strcmp(cdisplib_version(), Module_FullVersionAndDate) == 0,
+                         "version string should match VersionNum");
+
+    display = cdisplib_display_new("Self test");
+    if (display == NULL)
+    {
+        selftest_fail("display allocation failed");
+    }
+    else
+    {
+        selftest_check_menu_construction();
+        selftest_check_menu_warning_target();
+        selftest_check_metadata(display);
+        selftest_build_sample(display);
+        selftest_expect_int(cdisplib_display_lines(display), 3, "sample should create three lines");
+        selftest_check_line_navigation(display);
+        selftest_check_text_accessors(display);
+        selftest_check_selection(display);
+        selftest_check_render(display);
+        selftest_check_clipboard_messages(display);
+        selftest_check_release_entity_message();
+        selftest_check_clipboard_datasave_message();
+        selftest_check_font_palette_resolution(display);
+        selftest_check_reopen_bottom_adjust();
+        selftest_check_resize_adjust();
+        selftest_check_fullsize_adjust();
+        selftest_check_recreated_window_info();
+        selftest_check_selection_drag_parent_box();
+        selftest_check_selection_extend_choice();
+        selftest_check_file_output(display);
+        selftest_check_mutation(display);
+        selftest_check_menu_choices(display);
+        cdisplib_display_kill(&display);
+    }
+
+    if (failures == 0)
+    {
+        printf("PASS: all self-tests succeeded\n");
+        return 1;
+    }
+
+    printf("FAIL: %d self-test(s) failed\n", failures);
+    return 0;
+}

@@ -1,0 +1,1070 @@
+/*******************************************************************
+ * File:        display_rows
+ * Purpose:     Row and text-run management for CDispLib
+ * Author:      Gerph
+ ******************************************************************/
+
+#include "cdisplib_internal.h"
+
+static CDispLine *cdisplib_alloc_line(const char *text, int width);
+static CDispTextRun *cdisplib_alloc_run(const char *text, int bg, int fg, int width);
+static void cdisplib_recompute_widest_width(CDispDisplay *display);
+static int cdisplib_line_width(const CDispLine *line);
+static int cdisplib_run_x_to_column(const CDispDisplay *display, const char *text, int x);
+static void cdisplib_set_saved_text_filetype(const char *filename);
+
+/*******************************************************************
+ Function:      cdisplib_alloc_run
+ Description:   Allocate one text run
+ Parameters:    text = text for run
+                bg = background colour
+                fg = foreground colour
+                width = measured width
+ Returns:       new run or NULL
+ ******************************************************************/
+static CDispTextRun *cdisplib_alloc_run(const char *text, int bg, int fg, int width)
+{
+    CDispTextRun *run;
+    size_t text_length;
+
+    if (text == NULL || *text == '\0')
+    {
+        return NULL;
+    }
+
+    text_length = strlen(text);
+    run = malloc(sizeof(*run) + text_length);
+    if (run == NULL)
+    {
+        return NULL;
+    }
+
+    run->next = NULL;
+    run->foreground = fg;
+    run->background = bg;
+    run->width = width;
+    memcpy(run->text, text, text_length + 1);
+
+    return run;
+}
+
+/*******************************************************************
+ Function:      cdisplib_alloc_line
+ Description:   Allocate one line and optional initial run
+ Parameters:    text = initial text
+                width = measured width
+ Returns:       new line or NULL
+ ******************************************************************/
+static CDispLine *cdisplib_alloc_line(const char *text, int width)
+{
+    CDispLine *line;
+
+    line = calloc(1, sizeof(*line));
+    if (line == NULL)
+    {
+        return NULL;
+    }
+
+    if (text != NULL && *text != '\0')
+    {
+        line->runs = cdisplib_alloc_run(text, -1, -1, width);
+        if (line->runs == NULL)
+        {
+            free(line);
+            return NULL;
+        }
+    }
+
+    return line;
+}
+
+/*******************************************************************
+ Function:      cdisplib_line_width
+ Description:   Measure the already-cached width of a line
+ Parameters:    line = line to measure
+ Returns:       line width
+ ******************************************************************/
+static int cdisplib_line_width(const CDispLine *line)
+{
+    int width;
+    const CDispTextRun *run;
+
+    width = 0;
+    run = line != NULL ? line->runs : NULL;
+    while (run != NULL)
+    {
+        width += run->width;
+        run = run->next;
+    }
+
+    return width;
+}
+
+/*******************************************************************
+ Function:      cdisplib_run_x_to_column
+ Description:   Convert an x offset within a single run into a character index
+ Parameters:    display = display supplying font context
+                text = run text
+                x = x offset within the run
+ Returns:       character index
+ ******************************************************************/
+static int cdisplib_run_x_to_column(const CDispDisplay *display, const char *text, int x)
+{
+    int index;
+
+    if (text == NULL)
+    {
+        return 0;
+    }
+
+    if (display != NULL && display->font_metrics.handle != -1)
+    {
+        _kernel_oserror *error;
+        int pointer;
+
+        pointer = 0;
+        error = _swix(Font_ScanString,
+                      _IN(0) | _IN(1) | _IN(2) | _IN(3) | _IN(4) | _OUT(1),
+                      display->font_metrics.handle,
+                      text,
+                      (1 << 8),
+                      x * 400,
+                      1000000000,
+                      &pointer);
+        if (error == NULL)
+        {
+            index = pointer - (int) text;
+            if (index < 0)
+            {
+                index = 0;
+            }
+            return index;
+        }
+    }
+
+    if (display != NULL && display->font_metrics.name != NULL)
+    {
+        return 0;
+    }
+
+    index = x / 16;
+    if (index < 0)
+    {
+        index = 0;
+    }
+    if (index > (int) strlen(text))
+    {
+        index = (int) strlen(text);
+    }
+
+    return index;
+}
+
+/*******************************************************************
+ Function:      cdisplib_recompute_widest_width
+ Description:   Recalculate the widest line in a display
+ Parameters:    display = display to update
+ Returns:       none
+ ******************************************************************/
+static void cdisplib_recompute_widest_width(CDispDisplay *display)
+{
+    CDispLine *line;
+    int widest;
+
+    widest = display->min_width_chars * display->font_metrics.max_char_width;
+    line = display->head;
+    while (line != NULL)
+    {
+        int width;
+
+        width = cdisplib_line_width(line);
+        if (width > widest)
+        {
+            widest = width;
+        }
+        line = line->next;
+    }
+
+    display->widest_width = widest;
+}
+
+/*******************************************************************
+ Function:      cdisplib_set_saved_text_filetype
+ Description:   Mark a saved file as plain text on RISC OS
+ Parameters:    filename = file to mark
+ Returns:       none
+ ******************************************************************/
+static void cdisplib_set_saved_text_filetype(const char *filename)
+{
+    if (filename == NULL)
+    {
+        return;
+    }
+
+    _swix(OS_File, _INR(0, 2), 18, filename, 0xFFF);
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_add
+ Description:   Append a line to the display
+ Parameters:    display = display to extend
+                text = line text
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_add(CDispDisplay *display, const char *text)
+{
+    CDispLine *line;
+    int width;
+
+    if (display == NULL)
+    {
+        return;
+    }
+
+    width = cdisplib_measure_text(display, text != NULL ? text : "");
+    line = cdisplib_alloc_line(text != NULL ? text : "", width);
+    if (line == NULL)
+    {
+        return;
+    }
+
+    if (display->head == NULL)
+    {
+        display->head = line;
+    }
+    else
+    {
+        display->tail->next = line;
+        line->prev = display->tail;
+    }
+
+    display->tail = line;
+    display->line_count += 1;
+
+    if (width > display->widest_width)
+    {
+        display->widest_width = width;
+    }
+
+    if (display->window_handle != -1)
+    {
+        cdisplib_display_resize(display);
+        cdisplib_force_redraw(display,
+                              0,
+                              -display->line_count * display->font_metrics.line_height - CDISPLIB_WINDOW_BOTTOM_MARGIN,
+                              display->widest_width + 12,
+                              -(display->line_count - 1) * display->font_metrics.line_height);
+    }
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_add_at
+ Description:   Insert a line after the specified line, or at top
+ Parameters:    display = display to update
+                after_line = line after which to insert, or NULL for top
+                text = line text
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_add_at(CDispDisplay *display, CDispLine *after_line, const char *text)
+{
+    CDispLine *line;
+    int width;
+
+    if (display == NULL)
+    {
+        return;
+    }
+
+    width = cdisplib_measure_text(display, text != NULL ? text : "");
+    line = cdisplib_alloc_line(text != NULL ? text : "", width);
+    if (line == NULL)
+    {
+        return;
+    }
+
+    if (after_line == NULL)
+    {
+        line->next = display->head;
+        if (display->head != NULL)
+        {
+            display->head->prev = line;
+        }
+        else
+        {
+            display->tail = line;
+        }
+        display->head = line;
+    }
+    else
+    {
+        line->prev = after_line;
+        line->next = after_line->next;
+        if (after_line->next != NULL)
+        {
+            after_line->next->prev = line;
+        }
+        else
+        {
+            display->tail = line;
+        }
+        after_line->next = line;
+    }
+
+    display->line_count += 1;
+    if (width > display->widest_width)
+    {
+        display->widest_width = width;
+    }
+
+    cdisplib_display_resize(display);
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_add_to_at
+ Description:   Append a text run to a chosen line
+ Parameters:    display = display to update
+                line = line to extend
+                text = text to append
+                bg = background colour
+                fg = foreground colour
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_add_to_at(CDispDisplay *display, CDispLine *line, const char *text, int bg, int fg)
+{
+    CDispTextRun *run;
+    CDispTextRun *tail;
+    int width;
+    int line_width;
+    int line_number;
+
+    if (display == NULL || line == NULL || text == NULL || *text == '\0')
+    {
+        return;
+    }
+
+    width = cdisplib_measure_text(display, text);
+    run = cdisplib_alloc_run(text, bg, fg, width);
+    if (run == NULL)
+    {
+        return;
+    }
+
+    tail = line->runs;
+    if (tail == NULL)
+    {
+        line->runs = run;
+    }
+    else
+    {
+        while (tail->next != NULL)
+        {
+            tail = tail->next;
+        }
+        tail->next = run;
+    }
+
+    line_width = cdisplib_line_width(line);
+    if (line_width > display->widest_width)
+    {
+        display->widest_width = line_width;
+    }
+
+    if (display->window_handle != -1)
+    {
+        cdisplib_display_resize(display);
+        line_number = cdisplib_display_line_number_from_handle(display, line) + 1;
+        cdisplib_force_redraw(display,
+                              0,
+                              -line_number * display->font_metrics.line_height - CDISPLIB_WINDOW_BOTTOM_MARGIN,
+                              display->widest_width + 12,
+                          -(line_number - 1) * display->font_metrics.line_height);
+    }
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_add_to
+ Description:   Append a text run to the final line
+ Parameters:    display = display to update
+                text = text to append
+                bg = background colour
+                fg = foreground colour
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_add_to(CDispDisplay *display, const char *text, int bg, int fg)
+{
+    if (display == NULL)
+    {
+        return;
+    }
+
+    if (display->tail == NULL)
+    {
+        cdisplib_display_add(display, "");
+    }
+
+    cdisplib_display_add_to_at(display, display->tail, text, bg, fg);
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_clear
+ Description:   Clear all lines from a display
+ Parameters:    display = display to clear
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_clear(CDispDisplay *display)
+{
+    if (display == NULL)
+    {
+        return;
+    }
+
+    cdisplib_display_selection_clear(display);
+    cdisplib_force_redraw(display,
+                          0,
+                          -display->line_count * display->font_metrics.line_height - CDISPLIB_WINDOW_BOTTOM_MARGIN,
+                          display->widest_width + 12 + display->font_metrics.left_margin,
+                          0);
+    cdisplib_free_lines(display->head);
+    display->head = NULL;
+    display->tail = NULL;
+    display->line_count = 0;
+    display->widest_width = display->min_width_chars * display->font_metrics.max_char_width;
+    display->flags |= CDISPLIB_DISPLAY_MOVED;
+    cdisplib_display_resize(display);
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_delete_line
+ Description:   Delete a line from the display
+ Parameters:    display = display to update
+                line = line to delete, or NULL for last
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_delete_line(CDispDisplay *display, CDispLine *line)
+{
+    if (display == NULL)
+    {
+        return;
+    }
+
+    if (line == NULL)
+    {
+        line = display->tail;
+    }
+    if (line == NULL)
+    {
+        return;
+    }
+
+    if (line->prev != NULL)
+    {
+        line->prev->next = line->next;
+    }
+    else
+    {
+        display->head = line->next;
+    }
+
+    if (line->next != NULL)
+    {
+        line->next->prev = line->prev;
+    }
+    else
+    {
+        display->tail = line->prev;
+    }
+
+    cdisplib_free_text_runs(line->runs);
+    free(line);
+
+    display->line_count -= 1;
+    cdisplib_recompute_widest_width(display);
+    cdisplib_display_resize(display);
+    cdisplib_force_redraw(display,
+                          0,
+                          -display->line_count * display->font_metrics.line_height - CDISPLIB_WINDOW_BOTTOM_MARGIN,
+                          display->widest_width + 12,
+                          0);
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_wipe_line
+ Description:   Remove all text runs from a line
+ Parameters:    display = display containing the line
+                line = line to wipe, or NULL for last
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_wipe_line(CDispDisplay *display, CDispLine *line)
+{
+    if (display == NULL)
+    {
+        return;
+    }
+
+    if (line == NULL)
+    {
+        line = display->tail;
+    }
+    if (line == NULL)
+    {
+        return;
+    }
+
+    cdisplib_free_text_runs(line->runs);
+    line->runs = NULL;
+    cdisplib_recompute_widest_width(display);
+    cdisplib_force_redraw(display,
+                          0,
+                          -display->line_count * display->font_metrics.line_height - CDISPLIB_WINDOW_BOTTOM_MARGIN,
+                          display->widest_width + 12,
+                          -(display->line_count - 1) * display->font_metrics.line_height);
+}
+
+/*******************************************************************
+Function:      cdisplib_display_line_handle
+Description:   Return a line handle by zero-based line index
+Parameters:    display = display to query
+                line_index = zero-based line number from top
+Returns:       line handle or NULL
+ ******************************************************************/
+CDispLine *cdisplib_display_line_handle(const CDispDisplay *display, int line_index)
+{
+    CDispLine *line;
+    int index;
+
+    if (display == NULL)
+    {
+        return NULL;
+    }
+
+    if (line_index < 0)
+    {
+        return display->tail;
+    }
+    if (line_index >= display->line_count)
+    {
+        return display->tail;
+    }
+
+    line = display->head;
+    index = 0;
+    while (line != NULL && index < line_index)
+    {
+        line = line->next;
+        index += 1;
+    }
+
+    return line;
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_next_line
+ Description:   Return the next line in the vertical chain
+ Parameters:    line = current line
+ Returns:       next line or NULL
+ ******************************************************************/
+CDispLine *cdisplib_display_next_line(const CDispLine *line)
+{
+    return line != NULL ? line->next : NULL;
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_prev_line
+ Description:   Return the previous line in the vertical chain
+ Parameters:    line = current line
+ Returns:       previous line or NULL
+ ******************************************************************/
+CDispLine *cdisplib_display_prev_line(const CDispLine *line)
+{
+    return line != NULL ? line->prev : NULL;
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_line_from_y
+ Description:   Return the line handle corresponding to a relative y
+ Parameters:    display = display to query
+                y = relative y co-ordinate
+ Returns:       line handle or NULL
+ ******************************************************************/
+CDispLine *cdisplib_display_line_from_y(const CDispDisplay *display, int y)
+{
+    int line_number;
+
+    if (display == NULL || display->font_metrics.line_height <= 0)
+    {
+        return NULL;
+    }
+
+    if (y > -8 || y < -display->font_metrics.line_height * display->line_count)
+    {
+        return NULL;
+    }
+
+    line_number = cdisplib_display_line_number_from_y(display, y);
+    return cdisplib_display_line_handle(display, line_number);
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_line_number_from_y
+ Description:   Return the zero-based line number from relative y
+ Parameters:    display = display to query
+                y = relative y co-ordinate
+ Returns:       line number, or display line count if below content
+ ******************************************************************/
+int cdisplib_display_line_number_from_y(const CDispDisplay *display, int y)
+{
+    int line;
+
+    if (display == NULL || display->font_metrics.line_height <= 0)
+    {
+        return 0;
+    }
+
+    if (y > -8)
+    {
+        return 0;
+    }
+
+    line = (-(y + 8)) / display->font_metrics.line_height;
+    if (line < 0)
+    {
+        line = 0;
+    }
+    if (line > display->line_count)
+    {
+        line = display->line_count;
+    }
+
+    return line;
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_line_number_from_handle
+ Description:   Return the zero-based line number for a line handle
+ Parameters:    display = display to query
+                line = line to locate
+ Returns:       line number or -1
+ ******************************************************************/
+int cdisplib_display_line_number_from_handle(const CDispDisplay *display, const CDispLine *line)
+{
+    const CDispLine *cursor;
+    int index;
+
+    if (display == NULL || line == NULL)
+    {
+        return -1;
+    }
+
+    cursor = display->head;
+    index = 0;
+    while (cursor != NULL)
+    {
+        if (cursor == line)
+        {
+            return index;
+        }
+        cursor = cursor->next;
+        index += 1;
+    }
+
+    return -1;
+}
+
+static char *cdisplib_dup_slice(const char *text, int offset, int length)
+{
+    char *copy;
+
+    if (length < 0)
+    {
+        length = 0;
+    }
+
+    copy = malloc((size_t) length + 1);
+    if (copy == NULL)
+    {
+        return NULL;
+    }
+
+    memcpy(copy, text + offset, (size_t) length);
+    copy[length] = '\0';
+    return copy;
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_line_from_char
+ Description:   Return text from a line starting at a character offset
+ Parameters:    display = display to query
+                line = line to read
+                column = in/out character column
+ Returns:       duplicated substring or empty string
+ ******************************************************************/
+char *cdisplib_display_line_from_char(const CDispDisplay *display, const CDispLine *line, int *column)
+{
+    const CDispTextRun *run;
+    int wanted;
+    int count;
+    int run_length;
+    int offset;
+
+    (void) display;
+
+    if (line == NULL || column == NULL)
+    {
+        return cdisplib_strdup("");
+    }
+
+    wanted = *column;
+    run = line->runs;
+    count = 0;
+    while (run != NULL)
+    {
+        run_length = (int) strlen(run->text);
+        if (count + run_length > wanted)
+        {
+            offset = wanted - count;
+            *column = wanted + (run_length - offset);
+            return cdisplib_dup_slice(run->text, offset, run_length - offset);
+        }
+
+        count += run_length;
+        run = run->next;
+    }
+
+    *column = count;
+    return cdisplib_strdup("");
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_line_from
+ Description:   Return text from a line beginning at an x position
+ Parameters:    display = display to query
+                line = line to read
+                x = in/out x position
+ Returns:       duplicated substring or empty string
+ ******************************************************************/
+char *cdisplib_display_line_from(const CDispDisplay *display, const CDispLine *line, int *x)
+{
+    const CDispTextRun *run;
+    int remaining_x;
+    int cursor_x;
+    int scan_x;
+    int start_index;
+
+    if (display == NULL || line == NULL || x == NULL)
+    {
+        return cdisplib_strdup("");
+    }
+
+    remaining_x = *x - 4;
+    cursor_x = 4;
+    run = line->runs;
+    while (run != NULL && remaining_x >= run->width)
+    {
+        remaining_x -= run->width;
+        cursor_x += run->width;
+        run = run->next;
+    }
+
+    if (run == NULL)
+    {
+        return cdisplib_strdup("");
+    }
+
+    scan_x = remaining_x - display->font_metrics.left_margin;
+    if (scan_x < 0)
+    {
+        scan_x = 0;
+    }
+    start_index = cdisplib_run_x_to_column(display, run->text, scan_x);
+    if (start_index < 0)
+    {
+        start_index = 0;
+    }
+
+    *x = cursor_x + run->width;
+    return cdisplib_dup_slice(run->text,
+                              start_index,
+                              (int) strlen(run->text) - start_index);
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_line_to
+ Description:   Return text on a line up to an x position
+ Parameters:    display = display to query
+                line = line to read
+                x = in/out x position
+ Returns:       duplicated substring or empty string
+ ******************************************************************/
+char *cdisplib_display_line_to(const CDispDisplay *display, const CDispLine *line, int *x)
+{
+    const CDispTextRun *run;
+    int remaining_x;
+    int cursor_x;
+    int scan_x;
+    int end_index;
+
+    if (display == NULL || line == NULL || x == NULL)
+    {
+        return cdisplib_strdup("");
+    }
+
+    remaining_x = *x - 4;
+    cursor_x = 4;
+    run = line->runs;
+    while (run != NULL && remaining_x >= run->width)
+    {
+        remaining_x -= run->width;
+        cursor_x += run->width;
+        run = run->next;
+    }
+
+    if (run == NULL)
+    {
+        return cdisplib_strdup("");
+    }
+
+    scan_x = remaining_x - display->font_metrics.left_margin;
+    end_index = cdisplib_run_x_to_column(display, run->text, scan_x);
+    if (end_index < 0)
+    {
+        end_index = 0;
+    }
+
+    *x = cursor_x + run->width;
+    return cdisplib_dup_slice(run->text, 0, end_index);
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_line_from_start
+ Description:   Return the run covering x and expose its colours
+ Parameters:    display = display to query
+                line = line to read
+                x = in/out x position
+                bg = returned background colour for this run
+                fg = returned foreground colour for this run
+ Returns:       duplicated run text or empty string
+ ******************************************************************/
+char *cdisplib_display_line_from_start(const CDispDisplay *display, const CDispLine *line, int *x, int *bg, int *fg)
+{
+    const CDispTextRun *run;
+    int cursor_x;
+    int target;
+
+    if (display == NULL || line == NULL || x == NULL)
+    {
+        return cdisplib_strdup("");
+    }
+
+    target = *x - 4;
+    run = line->runs;
+    if (run != NULL)
+    {
+        cursor_x = run->width;
+    }
+    else
+    {
+        cursor_x = 0;
+    }
+
+    while (run != NULL)
+    {
+        if (cursor_x > target)
+        {
+            *x = cursor_x + 4;
+            if (bg != NULL)
+            {
+                *bg = run->background;
+            }
+            if (fg != NULL)
+            {
+                *fg = run->foreground;
+            }
+            return cdisplib_strdup(run->text);
+        }
+        run = run->next;
+        if (run != NULL)
+        {
+            cursor_x += run->width;
+        }
+    }
+
+    *x += 4;
+    return cdisplib_strdup("");
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_word_at
+ Description:   Return the word at an x position on a line
+ Parameters:    display = display to query
+                line = line to read
+                x = x position
+ Returns:       duplicated word or empty string
+ ******************************************************************/
+char *cdisplib_display_word_at(const CDispDisplay *display, const CDispLine *line, int x)
+{
+    const CDispTextRun *run;
+    const char *text;
+    char *word;
+    int column;
+    int run_column;
+    int start;
+    int end;
+    int run_width;
+
+    if (display == NULL || line == NULL)
+    {
+        return cdisplib_strdup("");
+    }
+
+    x -= 4;
+    run = line->runs;
+    while (run != NULL && x > run->width)
+    {
+        x -= run->width;
+        run = run->next;
+    }
+
+    if (run == NULL)
+    {
+        return cdisplib_strdup("");
+    }
+
+    run_width = x - display->font_metrics.left_margin;
+    if (run_width <= 0)
+    {
+        run_column = 0;
+    }
+    else
+    {
+        run_column = cdisplib_run_x_to_column(display, run->text, run_width);
+    }
+
+    text = run->text;
+    column = (int) strlen(text);
+    if (run_column < 0)
+    {
+        run_column = 0;
+    }
+    if (run_column > column)
+    {
+        run_column = column;
+    }
+
+    start = run_column;
+    while (start > 0 && text[start - 1] != ' ')
+    {
+        start -= 1;
+    }
+
+    end = run_column;
+    while (text[end] != '\0' && text[end] != ' ')
+    {
+        end += 1;
+    }
+
+    word = cdisplib_dup_slice(text, start, end - start);
+    return word;
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_save_text
+ Description:   Save the whole display to a text file
+ Parameters:    display = display to save
+                filename = output filename
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_save_text(const CDispDisplay *display, const char *filename)
+{
+    FILE *out;
+    const CDispLine *line;
+
+    if (display == NULL || filename == NULL)
+    {
+        return;
+    }
+
+    out = fopen(filename, "w");
+    if (out == NULL)
+    {
+        return;
+    }
+
+    line = display->head;
+    while (line != NULL)
+    {
+        int x;
+        char *part;
+        int done;
+
+        x = 0;
+        done = 0;
+        while (!done)
+        {
+            part = cdisplib_display_line_from(display, line, &x);
+            if (part != NULL)
+            {
+                fputs(part, out);
+                done = (*part == '\0');
+                free(part);
+            }
+            else
+            {
+                done = 1;
+            }
+        }
+
+        fputc('\n', out);
+        line = line->next;
+    }
+
+    fclose(out);
+    cdisplib_set_saved_text_filetype(filename);
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_save_selection
+ Description:   Save the current selection to a text file
+ Parameters:    display = display to save from
+                filename = output filename
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_save_selection(CDispDisplay *display, const char *filename)
+{
+    FILE *out;
+    CDispLine *line;
+    int line_number;
+    int column;
+    char *part;
+
+    if (display == NULL || filename == NULL)
+    {
+        return;
+    }
+
+    out = fopen(filename, "w");
+    if (out == NULL)
+    {
+        return;
+    }
+
+    line = NULL;
+    line_number = 0;
+    column = 0;
+    do
+    {
+        part = cdisplib_display_read_selection(display, &line, &line_number, &column);
+        if (part != NULL)
+        {
+            fputs(part, out);
+            if (*part == '\0' && line != NULL)
+            {
+                fputc('\n', out);
+            }
+            free(part);
+        }
+    }
+    while (line != NULL);
+
+    fclose(out);
+    cdisplib_set_saved_text_filetype(filename);
+}

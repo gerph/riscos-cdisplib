@@ -1,0 +1,186 @@
+/*******************************************************************
+ * File:        wimp_smoke
+ * Purpose:     Live Wimp smoke test for CDispLib
+ * Author:      Gerph
+ ******************************************************************/
+
+#include <stdio.h>
+#include <string.h>
+
+#include "kernel.h"
+#include "swis.h"
+#include "wimp.h"
+
+#include "cdisplib.h"
+#include "wimp_smoke.h"
+
+static int cdisplib_read_monotonic_time(void)
+{
+    int now;
+
+    now = 0;
+    _swix(OS_ReadMonotonicTime, _OUT(0), &now);
+    return now;
+}
+
+static int cdisplib_initialise_wimp_task(void)
+{
+    int version;
+    int task_handle;
+    _kernel_oserror *error;
+
+    version = 310;
+    task_handle = -1;
+    error = _swix(Wimp_Initialise,
+                  _IN(0) | _IN(1) | _IN(2) | _OUT(0) | _OUT(1),
+                  version,
+                  *(int *) "TASK",
+                  "CDispLib",
+                  &version,
+                  &task_handle);
+    if (error != NULL)
+    {
+        return 0;
+    }
+
+    cdisplib_set_task_handle(task_handle);
+    return 1;
+}
+
+static void cdisplib_populate_smoke_display(CDispDisplay *display)
+{
+    cdisplib_display_title(display, "CDispLib smoke");
+    cdisplib_display_colours(display, 7, 1);
+    cdisplib_display_add(display, "DispLib C port");
+    cdisplib_display_add_to(display, " smoke", -1, -1);
+    cdisplib_display_add(display, "selection, redraw, menu");
+    cdisplib_display_add(display, "clipboard and mode-change hooks");
+}
+
+int cdisplib_wimp_smoke_run(void)
+{
+    CDispDisplay *display;
+    wimp_eventstr event;
+    int deadline;
+    int running;
+
+    if (!cdisplib_initialise_wimp_task())
+    {
+        printf("FAIL: wimp_initialise failed\n");
+        return 0;
+    }
+
+    display = cdisplib_display_new("CDispLib");
+    if (display == NULL)
+    {
+        wimp_closedown();
+        printf("FAIL: display allocation failed\n");
+        return 0;
+    }
+
+    cdisplib_populate_smoke_display(display);
+    cdisplib_display_open(display);
+
+    deadline = cdisplib_read_monotonic_time() + 100;
+    running = 1;
+    while (running && cdisplib_read_monotonic_time() < deadline)
+    {
+        int earliest;
+
+        earliest = cdisplib_read_monotonic_time() + 10;
+        if (wimp_pollidle((wimp_emask) (wimp_EMNULL |
+                          wimp_EMREDRAW |
+                          wimp_EMOPEN |
+                          wimp_EMBUT |
+                          wimp_EMMENU |
+                          wimp_EMSEND |
+                          wimp_EMSENDWANTACK |
+                          wimp_EMACK),
+                          &event,
+                          earliest) != NULL)
+        {
+            printf("FAIL: wimp_pollidle failed\n");
+            running = 0;
+            break;
+        }
+
+        switch (event.e)
+        {
+        case wimp_EREDRAW:
+        {
+            CDispDisplay *target;
+
+            target = cdisplib_display_find(event.data.o.w);
+            if (target != NULL)
+            {
+                cdisplib_display_redraw(target);
+            }
+            break;
+        }
+
+        case wimp_EOPEN:
+        {
+            CDispDisplay *target;
+
+            target = cdisplib_display_find(event.data.o.w);
+            if (target != NULL)
+            {
+                cdisplib_display_reopen(target, &event.data.o);
+            }
+            else
+            {
+                wimp_open_wind(&event.data.o);
+            }
+            break;
+        }
+
+        case wimp_EBUT:
+            cdisplib_display_drag_check(&event.data.but.m, event.data.but.b);
+            if (event.data.but.b == wimp_BMID)
+            {
+                cdisplib_display_edit_menu_setup(display);
+                wimp_create_menu(cdisplib_display_edit_menu(),
+                                 event.data.but.m.x,
+                                 event.data.but.m.y);
+            }
+            break;
+
+        case wimp_EMENU:
+            cdisplib_display_edit_menu_choice(display, event.data.menu);
+            break;
+
+        case wimp_ESEND:
+        case wimp_ESENDWANTACK:
+        case wimp_EACK:
+            if (event.data.msg.hdr.action == wimp_MMODECHANGE ||
+                event.data.msg.hdr.action == wimp_PALETTECHANGE)
+            {
+                cdisplib_display_mode_change();
+            }
+            else if (event.data.msg.hdr.action == wimp_MMENUWARN)
+            {
+                cdisplib_display_menu_setup(display,
+                                            event.data.msg.data.words + 3,
+                                            event.data.msg.data.words[1],
+                                            event.data.msg.data.words[2]);
+            }
+            else if (event.data.msg.hdr.action == wimp_MCLOSEDOWN)
+            {
+                running = 0;
+            }
+            else
+            {
+                cdisplib_display_clipboard_message(&event.data.msg);
+            }
+            break;
+
+        default:
+            break;
+        }
+    }
+
+    cdisplib_display_kill(&display);
+    wimp_closedown();
+    printf("PASS: wimp smoke test completed\n");
+    return 1;
+}

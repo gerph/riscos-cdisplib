@@ -1,0 +1,95 @@
+/*******************************************************************
+ * File:        cdisplib_internal
+ * Purpose:     Internal structures and helpers for CDispLib
+ * Author:      Gerph
+ ******************************************************************/
+
+#ifndef CDISPLIB_INTERNAL_H
+#define CDISPLIB_INTERNAL_H
+
+#include "wimp.h"
+#include "font.h"
+
+#include "cdisplib.h"
+#include "cdisplib_render_internal.h"
+
+#define CDISPLIB_SELECTION_SCREEN_LIMIT 4096
+#define CDISPLIB_DEFAULT_WINDOW_LEFT   256
+#define CDISPLIB_WINDOW_Y_STEP         48
+#define CDISPLIB_WINDOW_BOTTOM_MARGIN  8
+
+#define CDISPLIB_DISPLAY_MOVED         0x01
+
+#define CDISPLIB_WIMP_AUTOSCROLL       Wimp_AutoScroll
+
+typedef enum cdisplib_menu_warning_target
+{
+    cdisplib_menu_warning_none = 0,
+    cdisplib_menu_warning_display = 1,
+    cdisplib_menu_warning_font = 2,
+    cdisplib_menu_warning_size = 3
+} CDispMenuWarningTarget;
+
+extern CDispDisplay *cdisplib_global_displays;
+extern int cdisplib_global_window_y;
+extern int cdisplib_global_palette[20];
+extern CDispDisplay *cdisplib_global_drag_display;
+extern wimp_t cdisplib_global_task_handle;
+extern char *cdisplib_global_clipboard;
+extern int cdisplib_global_clipboard_size;
+extern int cdisplib_global_clipboard_save_ref;
+
+char *cdisplib_strdup(const char *text);
+void cdisplib_free_text_runs(CDispTextRun *run);
+void cdisplib_free_lines(CDispLine *line);
+void cdisplib_force_redraw(CDispDisplay *display, int xmin, int ymin, int xmax, int ymax);
+void cdisplib_prepare_release_entity_message(wimp_msgstr *message);
+void cdisplib_prepare_clipboard_datasave_message(wimp_msgstr *message,
+                                                 wimp_t task_handle,
+                                                 int your_ref,
+                                                 int estimated_size);
+int cdisplib_save_clipboard_file(const char *filename);
+int cdisplib_measure_text(CDispDisplay *display, const char *text);
+int cdisplib_x_to_column(const CDispDisplay *display, const CDispLine *line, int x);
+int cdisplib_column_to_x(const CDispDisplay *display, const CDispLine *line, int column);
+void cdisplib_validate_font(CDispDisplay *display);
+
+void cdisplib_set_colour(const CDispDisplay *display, int colour);
+void cdisplib_set_font_colours(const CDispDisplay *display, int background, int foreground);
+void cdisplib_set_invert_colour(void);
+int cdisplib_resolve_font_palette_entry(const CDispDisplay *display,
+                                        int colour,
+                                        int fallback_colour,
+                                        int allow_default_fallback);
+
+void cdisplib_selection_bounds(const CDispDisplay *display, CDispSelectionBounds *bounds);
+int cdisplib_selection_compare_points(CDispSelectionPoint lhs, CDispSelectionPoint rhs);
+cdisplib_selection_end cdisplib_selection_choose_drag_end(CDispSelectionPoint point,
+                                                          CDispSelectionPoint anchor,
+                                                          CDispSelectionPoint focus);
+
+void cdisplib_make_window(CDispDisplay *display);
+void cdisplib_menu_shutdown(void);
+CDispMenuWarningTarget cdisplib_display_menu_warning_target(const int *selection);
+void cdisplib_selection_drag_parent_box(int have_autoscroll,
+                                        const wimp_openstr *open,
+                                        const wimp_wind *info,
+                                        wimp_box *parent);
+void cdisplib_adjust_resize_open(const CDispDisplay *display,
+                                 int was_open,
+                                 const wimp_openstr *current_open,
+                                 const wimp_wind *current_info,
+                                 const wimp_box *new_extent,
+                                 wimp_openstr *adjusted_open,
+                                 int *moved);
+void cdisplib_adjust_reopen_for_bottom(const wimp_openstr *current_open,
+                                       const wimp_wind *current_info,
+                                       wimp_openstr *requested_open);
+void cdisplib_adjust_fullsize_open(const CDispDisplay *display,
+                                   const wimp_openstr *current_open,
+                                   wimp_openstr *adjusted_open);
+void cdisplib_prepare_recreated_window(const wimp_wind *current_info,
+                                       const char *title,
+                                       wimp_wind *recreated_info);
+
+#endif

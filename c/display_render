@@ -1,0 +1,419 @@
+/*******************************************************************
+ * File:        display_render
+ * Purpose:     Redraw and x/column conversion for CDispLib
+ * Author:      Gerph
+ ******************************************************************/
+
+#include "cdisplib_render_internal.h"
+
+static int cdisplib_scan_text_to_index(const CDispDisplay *display, const char *text, int x);
+static int cdisplib_scan_text_to_x(const CDispDisplay *display, const char *text, int column);
+static void cdisplib_plot(int code, int x, int y);
+static void cdisplib_fill_rectangle(int x, int y, int width, int height);
+static void cdisplib_render_line(CDispDisplay *display,
+                                 CDispLine *line,
+                                 int line_index,
+                                 int work_left,
+                                 int work_top);
+
+static void cdisplib_plot(int code, int x, int y)
+{
+    _swix(OS_Plot, _INR(0, 2), code, x, y);
+}
+
+/*******************************************************************
+ Function:      cdisplib_fill_rectangle
+ Description:   Fill a graphics rectangle using the current colour
+ Parameters:    x = left edge
+                y = bottom edge
+                width = rectangle width
+                height = rectangle height
+ Returns:       none
+ ******************************************************************/
+static void cdisplib_fill_rectangle(int x, int y, int width, int height)
+{
+    if (width <= 0 || height <= 0)
+    {
+        return;
+    }
+
+    cdisplib_plot(4, x, y);
+    cdisplib_plot(97, x + width - 1, y);
+    cdisplib_plot(5, x + width - 1, y + height - 1);
+    cdisplib_plot(5, x, y + height - 1);
+}
+
+static int cdisplib_scan_text_to_index(const CDispDisplay *display, const char *text, int x)
+{
+    int index;
+
+    if (text == NULL)
+    {
+        return 0;
+    }
+
+    if (display != NULL && display->font_metrics.handle != -1)
+    {
+        _kernel_oserror *error;
+        int pointer;
+
+        pointer = 0;
+        error = _swix(Font_ScanString,
+                      _IN(0) | _IN(1) | _IN(2) | _IN(3) | _IN(4) | _OUT(1),
+                      display->font_metrics.handle,
+                      text,
+                      (1 << 8),
+                      x * 400,
+                      1000000000,
+                      &pointer);
+        if (error == NULL)
+        {
+            index = pointer - (int) text;
+            if (index < 0)
+            {
+                index = 0;
+            }
+            return index;
+        }
+    }
+
+    if (display != NULL && display->font_metrics.name != NULL)
+    {
+        return 0;
+    }
+
+    index = x / 16;
+    if (index < 0)
+    {
+        index = 0;
+    }
+    if (index > (int) strlen(text))
+    {
+        index = (int) strlen(text);
+    }
+
+    return index;
+}
+
+static int cdisplib_scan_text_to_x(const CDispDisplay *display, const char *text, int column)
+{
+    if (text == NULL || column <= 0)
+    {
+        return 0;
+    }
+
+    if (display != NULL && display->font_metrics.handle != -1)
+    {
+        _kernel_oserror *error;
+        int x_value;
+
+        x_value = 0;
+        error = _swix(Font_ScanString,
+                      _IN(0) | _IN(1) | _IN(2) | _IN(3) | _IN(4) | _IN(5) |
+                      _IN(6) | _IN(7) | _OUT(3),
+                      display->font_metrics.handle,
+                      text,
+                      (1 << 8) | (1 << 7),
+                      1000000000,
+                      1000000000,
+                      0,
+                      0,
+                      column,
+                      &x_value);
+        if (error == NULL)
+        {
+            return x_value / 400;
+        }
+    }
+
+    return column * 16;
+}
+
+static void cdisplib_render_line(CDispDisplay *display,
+                                 CDispLine *line,
+                                 int line_index,
+                                 int work_left,
+                                 int work_top)
+{
+    CDispTextRun *run;
+    int x;
+    int fg;
+    int bg;
+    CDispSelectionBounds bounds;
+
+    run = line->runs;
+    x = 0;
+    fg = display->default_foreground;
+    bg = -1;
+    cdisplib_set_font_colours(display, bg, fg);
+
+    while (run != NULL)
+    {
+        if (run->foreground != -1)
+        {
+            fg = run->foreground;
+            cdisplib_set_font_colours(display, bg, fg);
+        }
+        if (run->background != -1)
+        {
+            bg = run->background == CDISPLIB_MOTTLED_BG ? -1 : run->background;
+        }
+        if (bg != -1)
+        {
+            cdisplib_set_colour(display, bg);
+            if (x == 0)
+            {
+                cdisplib_fill_rectangle(work_left,
+                                        work_top - 4 - display->font_metrics.line_height * (line_index + 1),
+                                        display->font_metrics.left_margin + run->width + 4,
+                                        display->font_metrics.line_height - 1);
+            }
+            else
+            {
+                cdisplib_fill_rectangle(display->font_metrics.left_margin + 4 + x + work_left,
+                                        work_top - 4 - display->font_metrics.line_height * (line_index + 1),
+                                        display->font_metrics.left_margin + run->width,
+                                        display->font_metrics.line_height - 1);
+            }
+            cdisplib_set_font_colours(display, bg, fg);
+        }
+        if (display->font_metrics.handle != -1)
+        {
+            cdisplib_set_font_colours(display, bg, fg);
+            _swix(Font_Paint,
+                  _INR(0, 4),
+                  display->font_metrics.handle,
+                  run->text,
+                  (1 << 8) | (1 << 4),
+                  display->font_metrics.left_margin + 4 + x + work_left,
+                  display->font_metrics.baseline_offset +
+                  work_top - display->font_metrics.line_height * (line_index + 1));
+        }
+        else if (display->font_metrics.name == NULL)
+        {
+            cdisplib_plot(4,
+                          4 + x + work_left,
+                          work_top - 8 - display->font_metrics.line_height * line_index);
+            _swix(OS_Write0, _IN(0), run->text);
+        }
+        x += run->width;
+        run = run->next;
+    }
+
+    if (bg != -1)
+    {
+        cdisplib_set_colour(display, bg);
+        cdisplib_fill_rectangle(display->font_metrics.left_margin + 4 + x + work_left,
+                                work_top - 4 - display->font_metrics.line_height * (line_index + 1),
+                                CDISPLIB_RIGHT_FILL_WIDTH,
+                                display->font_metrics.line_height - 1);
+    }
+
+    cdisplib_selection_bounds(display, &bounds);
+    if (bounds.active && bounds.start.line <= line_index && bounds.end.line >= line_index)
+    {
+        int left_x;
+        int right_x;
+
+        cdisplib_set_invert_colour();
+        if (bounds.start.line == line_index)
+        {
+            left_x = cdisplib_column_to_x(display, line, bounds.start.column);
+        }
+        else
+        {
+            left_x = -1;
+        }
+        if (bounds.end.line == line_index)
+        {
+            right_x = cdisplib_column_to_x(display, line, bounds.end.column);
+        }
+        else
+        {
+            right_x = 0x4000;
+        }
+        cdisplib_plot(4,
+                      display->font_metrics.left_margin / 2 + left_x + work_left,
+                      work_top - 4 - display->font_metrics.line_height * (line_index + 1));
+        cdisplib_plot(97,
+                      display->font_metrics.left_margin / 2 + right_x + work_left,
+                      work_top - 4 - display->font_metrics.line_height * (line_index + 1));
+        cdisplib_plot(5,
+                      display->font_metrics.left_margin / 2 + right_x + work_left,
+                      work_top - 4 - display->font_metrics.line_height * line_index - 1);
+        cdisplib_plot(5,
+                      display->font_metrics.left_margin / 2 + left_x + work_left,
+                      work_top - 4 - display->font_metrics.line_height * line_index - 1);
+    }
+}
+
+/*******************************************************************
+ Function:      cdisplib_x_to_column
+ Description:   Convert an x co-ordinate into a character offset
+ Parameters:    display = display supplying font metrics
+                line = line to resolve within
+                x = relative x position
+ Returns:       character offset
+ ******************************************************************/
+int cdisplib_x_to_column(const CDispDisplay *display, const CDispLine *line, int x)
+{
+    const CDispTextRun *run;
+    int column;
+
+    if (display == NULL || line == NULL)
+    {
+        return 0;
+    }
+
+    x -= 4;
+    run = line->runs;
+    column = 0;
+    while (run != NULL && x > run->width)
+    {
+        column += (int) strlen(run->text);
+        x -= run->width;
+        run = run->next;
+    }
+
+    if (run == NULL)
+    {
+        return column;
+    }
+
+    x -= display->font_metrics.left_margin;
+    if (x <= 0)
+    {
+        return column;
+    }
+
+    return column + cdisplib_scan_text_to_index(display, run->text, x);
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_x_to_column
+ Description:   Public wrapper for x-to-column conversion
+ Parameters:    display = display supplying font metrics
+                line = line to resolve within
+                x = relative x position
+ Returns:       character offset
+ ******************************************************************/
+int cdisplib_display_x_to_column(const CDispDisplay *display, const CDispLine *line, int x)
+{
+    return cdisplib_x_to_column(display, line, x);
+}
+
+/*******************************************************************
+ Function:      cdisplib_column_to_x
+ Description:   Convert a character offset into an x co-ordinate
+ Parameters:    display = display supplying font metrics
+                line = line to resolve within
+                column = character offset
+ Returns:       x position
+ ******************************************************************/
+int cdisplib_column_to_x(const CDispDisplay *display, const CDispLine *line, int column)
+{
+    const CDispTextRun *run;
+    int x;
+
+    if (display == NULL || line == NULL)
+    {
+        return 0;
+    }
+
+    x = 4;
+    run = line->runs;
+    while (run != NULL && column > 0)
+    {
+        int run_length;
+
+        run_length = (int) strlen(run->text);
+        if (column > run_length)
+        {
+            x += run->width;
+            column -= run_length;
+        }
+        else
+        {
+            return x + cdisplib_scan_text_to_x(display, run->text, column);
+        }
+        run = run->next;
+    }
+
+    return x;
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_column_to_x
+ Description:   Public wrapper for column-to-x conversion
+ Parameters:    display = display supplying font metrics
+                line = line to resolve within
+                column = character offset
+ Returns:       x position
+ ******************************************************************/
+int cdisplib_display_column_to_x(const CDispDisplay *display, const CDispLine *line, int column)
+{
+    return cdisplib_column_to_x(display, line, column);
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_render
+ Description:   Render a display into the current graphics context
+ Parameters:    display = display to render
+                work_left = screen x of the work-area origin
+                work_top = screen y of the work-area origin
+                clip = screen-space rectangle to refresh
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_render(CDispDisplay *display,
+                             int work_left,
+                             int work_top,
+                             const CDispRenderBox *clip)
+{
+    int bottom;
+    int top;
+    int start_line;
+    int end_line;
+    CDispLine *line;
+    int line_index;
+
+    if (display == NULL || clip == NULL || display->font_metrics.line_height <= 0)
+    {
+        return;
+    }
+
+    if (display->default_background != -1)
+    {
+        cdisplib_set_colour(display, display->default_background);
+        cdisplib_plot(4, clip->x0, clip->y0);
+        cdisplib_plot(97, clip->x1 - 1, clip->y0);
+        cdisplib_plot(5, clip->x1 - 1, clip->y1 - 1);
+        cdisplib_plot(5, clip->x0, clip->y1 - 1);
+    }
+
+    if (display->font_metrics.handle != -1)
+    {
+        _swix(Font_SetFont, _IN(0), display->font_metrics.handle);
+    }
+
+    bottom = clip->y0 - work_top;
+    top = clip->y1 - work_top;
+    start_line = (-top / display->font_metrics.line_height) - 1;
+    end_line = (-bottom / display->font_metrics.line_height);
+    if (start_line < 0)
+    {
+        start_line = 0;
+    }
+    if (end_line > display->line_count - 1)
+    {
+        end_line = display->line_count - 1;
+    }
+
+    line = cdisplib_display_line_handle(display, start_line);
+    line_index = start_line;
+    while (line != NULL && line_index <= end_line)
+    {
+        cdisplib_render_line(display, line, line_index, work_left, work_top);
+        line = line->next;
+        line_index += 1;
+    }
+}

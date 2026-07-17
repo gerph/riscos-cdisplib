@@ -1,0 +1,473 @@
+/*******************************************************************
+ * File:        display_core
+ * Purpose:     Core display lifecycle and shared helpers
+ * Author:      Gerph
+ ******************************************************************/
+
+#include "cdisplib_internal.h"
+#include "VersionNum"
+
+CDispDisplay *cdisplib_global_displays = NULL;
+int cdisplib_global_window_y = -1;
+int cdisplib_global_palette[20];
+CDispDisplay *cdisplib_global_drag_display = NULL;
+wimp_t cdisplib_global_task_handle = -1;
+char *cdisplib_global_clipboard = NULL;
+int cdisplib_global_clipboard_size = 0;
+int cdisplib_global_clipboard_save_ref = 0;
+
+/*******************************************************************
+ Function:      cdisplib_version
+ Description:   Return the library version string
+ Parameters:    none
+ Returns:       version string
+ ******************************************************************/
+const char *cdisplib_version(void)
+{
+    return Module_FullVersionAndDate;
+}
+
+/*******************************************************************
+ Function:      cdisplib_strdup
+ Description:   Duplicate a C string
+ Parameters:    text = source string
+ Returns:       duplicated string or NULL
+ ******************************************************************/
+char *cdisplib_strdup(const char *text)
+{
+    char *copy;
+    size_t size;
+
+    if (text == NULL)
+    {
+        return NULL;
+    }
+
+    size = strlen(text) + 1;
+    copy = malloc(size);
+    if (copy != NULL)
+    {
+        memcpy(copy, text, size);
+    }
+
+    return copy;
+}
+
+/*******************************************************************
+ Function:      cdisplib_free_text_runs
+ Description:   Release a horizontal text-run chain
+ Parameters:    run = first run
+ Returns:       none
+ ******************************************************************/
+void cdisplib_free_text_runs(CDispTextRun *run)
+{
+    while (run != NULL)
+    {
+        CDispTextRun *next;
+
+        next = run->next;
+        free(run);
+        run = next;
+    }
+}
+
+/*******************************************************************
+ Function:      cdisplib_free_lines
+ Description:   Release a vertical line chain
+ Parameters:    line = first line
+ Returns:       none
+ ******************************************************************/
+void cdisplib_free_lines(CDispLine *line)
+{
+    while (line != NULL)
+    {
+        CDispLine *next;
+
+        next = line->next;
+        cdisplib_free_text_runs(line->runs);
+        free(line);
+        line = next;
+    }
+}
+
+/*******************************************************************
+ Function:      cdisplib_prepare_release_entity_message
+ Description:   Populate a clipboard release-entity message block
+ Parameters:    message = message block to initialise
+ Returns:       none
+ ******************************************************************/
+void cdisplib_prepare_release_entity_message(wimp_msgstr *message)
+{
+    if (message == NULL)
+    {
+        return;
+    }
+
+    memset(message, 0, sizeof(*message));
+    message->hdr.size = 24;
+    message->hdr.action = wimp_MRELEASEENTITY;
+    message->data.claimentity.flags = wimp_CECLIPBOARD;
+}
+
+/*******************************************************************
+ Function:      cdisplib_init
+ Description:   Initialise global display state
+ Parameters:    none
+ Returns:       none
+ ******************************************************************/
+void cdisplib_init(void)
+{
+    int i;
+    wimp_palettestr palette;
+    os_error *error;
+
+    for (i = 0; i != 20; ++i)
+    {
+        cdisplib_global_palette[i] = i;
+    }
+    cdisplib_global_task_handle = -1;
+
+    error = wimp_readpalette(&palette);
+    if (error == NULL)
+    {
+        for (i = 0; i != 16; ++i)
+        {
+            cdisplib_global_palette[i] = palette.c[i].word;
+        }
+    }
+}
+
+/*******************************************************************
+ Function:      cdisplib_set_task_handle
+ Description:   Record the caller's Wimp task handle for message filtering
+ Parameters:    task_handle = current task handle
+ Returns:       none
+ ******************************************************************/
+void cdisplib_set_task_handle(wimp_t task_handle)
+{
+    cdisplib_global_task_handle = task_handle;
+}
+
+/*******************************************************************
+ Function:      cdisplib_get_task_handle
+ Description:   Return the current recorded Wimp task handle
+ Parameters:    none
+ Returns:       current task handle, or -1 if unknown
+ ******************************************************************/
+wimp_t cdisplib_get_task_handle(void)
+{
+    return cdisplib_global_task_handle;
+}
+
+/*******************************************************************
+ Function:      cdisplib_shutdown
+ Description:   Release all displays
+ Parameters:    none
+ Returns:       none
+ ******************************************************************/
+void cdisplib_shutdown(void)
+{
+    if (cdisplib_global_clipboard != NULL && cdisplib_global_task_handle != -1)
+    {
+        wimp_msgstr message;
+        wimp_eventstr event;
+        wimp_etype reason;
+
+        cdisplib_prepare_release_entity_message(&message);
+        wimp_sendmessage(wimp_ESENDWANTACK, &message, 0);
+        cdisplib_global_clipboard_save_ref = message.hdr.my_ref;
+
+        do
+        {
+            if (wimp_poll((wimp_emask) 0, &event) != NULL)
+            {
+                break;
+            }
+
+            reason = event.e;
+            if (reason == wimp_ESEND || reason == wimp_ESENDWANTACK)
+            {
+                if (!cdisplib_display_clipboard_message(&event.data.msg) &&
+                    event.data.msg.hdr.action != wimp_MCLOSEDOWN)
+                {
+                    reason = wimp_ENULL;
+                }
+            }
+            else if (reason == wimp_EACK &&
+                     event.data.msg.hdr.your_ref != cdisplib_global_clipboard_save_ref)
+            {
+                reason = wimp_ESEND;
+            }
+        }
+        while (reason == wimp_ESEND || reason == wimp_ESENDWANTACK);
+    }
+
+    while (cdisplib_global_displays != NULL)
+    {
+        CDispDisplay *display;
+
+        display = cdisplib_global_displays;
+        cdisplib_display_kill(&display);
+    }
+
+    free(cdisplib_global_clipboard);
+    cdisplib_global_clipboard = NULL;
+    cdisplib_global_clipboard_size = 0;
+    cdisplib_global_clipboard_save_ref = 0;
+    cdisplib_global_task_handle = -1;
+    cdisplib_menu_shutdown();
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_new
+ Description:   Create a new display object
+ Parameters:    title = initial title
+ Returns:       new display or NULL
+ ******************************************************************/
+CDispDisplay *cdisplib_display_new(const char *title)
+{
+    CDispDisplay *display;
+
+    display = calloc(1, sizeof(*display));
+    if (display == NULL)
+    {
+        return NULL;
+    }
+
+    display->window_handle = -1;
+    display->title = cdisplib_strdup(title != NULL ? title : "");
+    display->default_background = CDISPLIB_DEFAULT_BG;
+    display->default_foreground = CDISPLIB_DEFAULT_FG;
+    display->min_width_chars = 6;
+    display->natural_height_lines = 12;
+    display->selection.active = 0;
+    display->font_metrics.handle = -1;
+    display->font_metrics.size_16ths = 12 * 16;
+    cdisplib_validate_font(display);
+    display->widest_width = display->min_width_chars * display->font_metrics.max_char_width;
+
+    display->next_global = cdisplib_global_displays;
+    cdisplib_global_displays = display;
+
+    return display;
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_kill
+ Description:   Destroy a display object
+ Parameters:    display = pointer to display pointer
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_kill(CDispDisplay **display)
+{
+    CDispDisplay *current;
+    CDispDisplay **link;
+
+    if (display == NULL || *display == NULL)
+    {
+        return;
+    }
+
+    current = *display;
+
+    if (current->window_handle != -1)
+    {
+        wimp_delete_wind(current->window_handle);
+    }
+
+    if (current->font_metrics.handle != -1)
+    {
+        font_lose(current->font_metrics.handle);
+    }
+
+    free(current->font_metrics.name);
+    free(current->title);
+    free(current->private_palette.entries);
+    cdisplib_free_lines(current->head);
+
+    link = &cdisplib_global_displays;
+    while (*link != NULL)
+    {
+        if (*link == current)
+        {
+            *link = current->next_global;
+            break;
+        }
+        link = &(*link)->next_global;
+    }
+
+    if (cdisplib_global_drag_display == current)
+    {
+        cdisplib_global_drag_display = NULL;
+    }
+
+    free(current);
+    *display = NULL;
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_lines
+ Description:   Return the number of lines in a display
+ Parameters:    display = display to query
+ Returns:       line count
+ ******************************************************************/
+int cdisplib_display_lines(const CDispDisplay *display)
+{
+    return display != NULL ? display->line_count : 0;
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_window
+ Description:   Return the window handle for a display, creating it if needed
+ Parameters:    display = display to query
+ Returns:       window handle or -1
+ ******************************************************************/
+wimp_w cdisplib_display_window(const CDispDisplay *display)
+{
+    if (display == NULL)
+    {
+        return -1;
+    }
+
+    if (display->window_handle == -1)
+    {
+        cdisplib_make_window((CDispDisplay *) display);
+    }
+
+    return display->window_handle;
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_find
+ Description:   Find a display by window handle
+ Parameters:    handle = window handle
+ Returns:       matching display or NULL
+ ******************************************************************/
+CDispDisplay *cdisplib_display_find(wimp_w handle)
+{
+    CDispDisplay *display;
+
+    display = cdisplib_global_displays;
+    while (display != NULL)
+    {
+        if (display->window_handle == handle)
+        {
+            return display;
+        }
+        display = display->next_global;
+    }
+
+    return NULL;
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_colours
+ Description:   Change default display colours
+ Parameters:    display = display to update
+                fg = foreground, -2 keeps current value
+                bg = background, -2 keeps current value
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_colours(CDispDisplay *display, int fg, int bg)
+{
+    if (display == NULL)
+    {
+        return;
+    }
+
+    if (fg != -2)
+    {
+        display->default_foreground = fg;
+    }
+    if (bg != -2)
+    {
+        display->default_background = bg;
+    }
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_size
+ Description:   Change display size limits
+ Parameters:    display = display to update
+                min_width_chars = minimum width in characters
+                natural_height_lines = natural height in lines
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_size(CDispDisplay *display, int min_width_chars, int natural_height_lines)
+{
+    if (display == NULL)
+    {
+        return;
+    }
+
+    if (min_width_chars != -1)
+    {
+        display->min_width_chars = min_width_chars;
+        if (display->widest_width < min_width_chars * display->font_metrics.max_char_width)
+        {
+            display->widest_width = min_width_chars * display->font_metrics.max_char_width;
+        }
+    }
+
+    if (natural_height_lines != -1)
+    {
+        display->natural_height_lines = natural_height_lines;
+    }
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_get_font
+ Description:   Read the current font settings
+ Parameters:    display = display to query
+                font_name = returned font name pointer
+                size_points = returned point size
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_get_font(const CDispDisplay *display, const char **font_name, int *size_points)
+{
+    if (font_name != NULL)
+    {
+        *font_name = display != NULL ? display->font_metrics.name : NULL;
+    }
+    if (size_points != NULL)
+    {
+        *size_points = display != NULL ? display->font_metrics.size_16ths / 16 : 0;
+    }
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_set_private_word
+ Description:   Store a private value in a display
+ Parameters:    display = display to update
+                private_word = new value
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_set_private_word(CDispDisplay *display, int private_word)
+{
+    if (display != NULL)
+    {
+        display->private_word = private_word;
+    }
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_get_private_word
+ Description:   Read the private value from a display
+ Parameters:    display = display to query
+ Returns:       private value or 0
+ ******************************************************************/
+int cdisplib_display_get_private_word(const CDispDisplay *display)
+{
+    return display != NULL ? display->private_word : 0;
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_has_selection
+ Description:   Report whether a selection exists
+ Parameters:    display = display to query
+ Returns:       non-zero if selection active
+ ******************************************************************/
+int cdisplib_display_has_selection(const CDispDisplay *display)
+{
+    return display != NULL ? display->selection.active : 0;
+}

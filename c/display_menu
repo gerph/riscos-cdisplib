@@ -1,0 +1,656 @@
+/*******************************************************************
+ * File:        display_menu
+ * Purpose:     Edit and display menu support for CDispLib
+ * Author:      Gerph
+ ******************************************************************/
+
+#include "cdisplib_internal.h"
+
+typedef struct cdisplib_menu_state
+{
+    wimp_menustr *menu;
+    wimp_menuitem *items;
+    char **labels;
+    int item_count;
+} CDispMenuState;
+
+enum
+{
+    cdisplib_edit_clear = 0,
+    cdisplib_edit_copy = 1,
+    cdisplib_edit_select_all = 2,
+    cdisplib_edit_clear_selection = 3
+};
+
+enum
+{
+    cdisplib_display_menu_font = 0,
+    cdisplib_display_menu_size = 1
+};
+
+static const int cdisplib_size_values[] = { 6, 8, 10, 12, 14, 16, 20, 48 };
+
+static CDispMenuState cdisplib_edit_menu_state;
+static CDispMenuState cdisplib_display_menu_state;
+static CDispMenuState cdisplib_size_menu_state;
+static wimp_menustr *cdisplib_font_menu = NULL;
+static int cdisplib_display_menu_extra_count = 0;
+
+static wimp_iconflags cdisplib_menu_iconflags(void);
+static wimp_menustr *cdisplib_menu_alloc(CDispMenuState *state,
+                                         const char *title,
+                                         const char *const *labels,
+                                         int item_count,
+                                         int width);
+static char *cdisplib_menu_decode_label(const char *token, size_t length);
+static void cdisplib_menu_set_shaded(CDispMenuState *state, int index, int shaded);
+static void cdisplib_menu_set_tick(CDispMenuState *state, int index, int ticked);
+static void cdisplib_menu_free(CDispMenuState *state);
+
+static wimp_iconflags cdisplib_menu_iconflags(void)
+{
+    return (wimp_iconflags) (wimp_ITEXT | wimp_INDIRECT | (7 << 24) | (2 << 28));
+}
+
+static void cdisplib_menu_free(CDispMenuState *state)
+{
+    int i;
+
+    if (state == NULL)
+    {
+        return;
+    }
+
+    if (state->labels != NULL)
+    {
+        for (i = 0; i < state->item_count; ++i)
+        {
+            free(state->labels[i]);
+        }
+    }
+    free(state->labels);
+    free(state->menu);
+    state->menu = NULL;
+    state->items = NULL;
+    state->labels = NULL;
+    state->item_count = 0;
+}
+
+static char *cdisplib_menu_decode_label(const char *token, size_t length)
+{
+    const char *end;
+    char *label;
+
+    end = memchr(token, ']', length);
+    if (end != NULL)
+    {
+        length = (size_t) (end - token);
+    }
+
+    while (length > 0 && *token == ' ')
+    {
+        token += 1;
+        length -= 1;
+    }
+    while (length > 0 && token[length - 1] == ' ')
+    {
+        length -= 1;
+    }
+
+    label = malloc(length + 1);
+    if (label == NULL)
+    {
+        return NULL;
+    }
+
+    memcpy(label, token, length);
+    label[length] = '\0';
+    return label;
+}
+
+static wimp_menustr *cdisplib_menu_alloc(CDispMenuState *state,
+                                         const char *title,
+                                         const char *const *labels,
+                                         int item_count,
+                                         int width)
+{
+    size_t size;
+    int i;
+
+    if (state->menu != NULL)
+    {
+        return state->menu;
+    }
+
+    size = sizeof(wimp_menustr) + sizeof(wimp_menuitem) * (size_t) item_count;
+    state->menu = calloc(1, size);
+    state->labels = calloc((size_t) item_count, sizeof(char *));
+    if (state->menu == NULL || state->labels == NULL)
+    {
+        cdisplib_menu_free(state);
+        return NULL;
+    }
+
+    state->item_count = item_count;
+    state->items = (wimp_menuitem *) (state->menu + 1);
+    memset(state->menu->hdr.title, ' ', sizeof(state->menu->hdr.title));
+    strncpy(state->menu->hdr.title, title, sizeof(state->menu->hdr.title));
+    state->menu->hdr.tit_fcol = 7;
+    state->menu->hdr.tit_bcol = 2;
+    state->menu->hdr.work_fcol = 7;
+    state->menu->hdr.work_bcol = 0;
+    state->menu->hdr.width = width;
+    state->menu->hdr.height = 44;
+    state->menu->hdr.gap = 0;
+
+    for (i = 0; i < item_count; ++i)
+    {
+        wimp_menuitem *item;
+
+        item = &state->items[i];
+        state->labels[i] = cdisplib_strdup(labels[i]);
+        item->flags = (wimp_menuflags) ((i == item_count - 1) ? wimp_MLAST : 0);
+        item->submenu = (wimp_menuptr) -1;
+        item->iconflags = cdisplib_menu_iconflags();
+        item->data.indirecttext.buffer = state->labels[i];
+        item->data.indirecttext.validstring = NULL;
+        item->data.indirecttext.bufflen = (int) strlen(labels[i]) + 1;
+    }
+
+    return state->menu;
+}
+
+static void cdisplib_menu_set_shaded(CDispMenuState *state, int index, int shaded)
+{
+    if (state == NULL || state->items == NULL || index < 0 || index >= state->item_count)
+    {
+        return;
+    }
+
+    if (shaded)
+    {
+        state->items[index].iconflags = (wimp_iconflags) (state->items[index].iconflags | wimp_INOSELECT);
+    }
+    else
+    {
+        state->items[index].iconflags = (wimp_iconflags) (state->items[index].iconflags & ~wimp_INOSELECT);
+    }
+}
+
+static void cdisplib_menu_set_tick(CDispMenuState *state, int index, int ticked)
+{
+    if (state == NULL || state->items == NULL || index < 0 || index >= state->item_count)
+    {
+        return;
+    }
+
+    if (ticked)
+    {
+        state->items[index].flags = (wimp_menuflags) (state->items[index].flags | wimp_MTICK);
+    }
+    else
+    {
+        state->items[index].flags = (wimp_menuflags) (state->items[index].flags & ~wimp_MTICK);
+    }
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_menu_warning_target
+ Description:   Decode which submenu target a menu warning refers to
+ Parameters:    selection = warning selection path, or NULL
+ Returns:       target to open, or none
+ ******************************************************************/
+CDispMenuWarningTarget cdisplib_display_menu_warning_target(const int *selection)
+{
+    if (selection == NULL)
+    {
+        return cdisplib_menu_warning_none;
+    }
+
+    switch (selection[0])
+    {
+    case -1:
+        return cdisplib_menu_warning_display;
+
+    case cdisplib_display_menu_font:
+        return cdisplib_menu_warning_font;
+
+    case cdisplib_display_menu_size:
+        return cdisplib_menu_warning_size;
+
+    default:
+        return cdisplib_menu_warning_none;
+    }
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_edit_menu
+ Description:   Return the shared edit menu
+ Parameters:    none
+ Returns:       menu pointer
+ ******************************************************************/
+wimp_menustr *cdisplib_display_edit_menu(void)
+{
+    static const char *const labels[] =
+    {
+        "Clear display",
+        "Copy to clipboard",
+        "Select all",
+        "Clear selection"
+    };
+
+    return cdisplib_menu_alloc(&cdisplib_edit_menu_state, "Edit", labels, 4, 180);
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_menu
+ Description:   Return the shared display menu
+ Parameters:    none
+ Returns:       menu pointer
+ ******************************************************************/
+wimp_menustr *cdisplib_display_menu(void)
+{
+    return cdisplib_display_menu_with_extras(NULL, 0);
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_menu_with_append
+ Description:   Return the shared display menu with BASIC-style appended items
+ Parameters:    append = menu item string, separated by '|'
+ Returns:       menu pointer
+ ******************************************************************/
+wimp_menustr *cdisplib_display_menu_with_append(const char *append)
+{
+    const char **labels;
+    char **allocated;
+    int count;
+    const char *cursor;
+    wimp_menustr *menu;
+    int i;
+
+    if (append == NULL || *append == '\0')
+    {
+        return cdisplib_display_menu_with_extras(NULL, 0);
+    }
+
+    count = 0;
+    cursor = append;
+    while (*cursor != '\0')
+    {
+        if (*cursor == '|')
+        {
+            cursor += 1;
+        }
+        if (*cursor == '\0')
+        {
+            break;
+        }
+        count += 1;
+        while (*cursor != '\0' && *cursor != '|')
+        {
+            cursor += 1;
+        }
+    }
+
+    if (count == 0)
+    {
+        return cdisplib_display_menu_with_extras(NULL, 0);
+    }
+
+    labels = calloc((size_t) count, sizeof(*labels));
+    allocated = calloc((size_t) count, sizeof(*allocated));
+    if (labels == NULL || allocated == NULL)
+    {
+        free(labels);
+        free(allocated);
+        return NULL;
+    }
+
+    count = 0;
+    cursor = append;
+    while (*cursor != '\0')
+    {
+        const char *start;
+        const char *end;
+
+        if (*cursor == '|')
+        {
+            cursor += 1;
+        }
+        if (*cursor == '\0')
+        {
+            break;
+        }
+        start = cursor;
+        while (*cursor != '\0' && *cursor != '|')
+        {
+            cursor += 1;
+        }
+        end = cursor;
+        allocated[count] = cdisplib_menu_decode_label(start, (size_t) (end - start));
+        if (allocated[count] == NULL)
+        {
+            for (i = 0; i < count; ++i)
+            {
+                free(allocated[i]);
+            }
+            free(allocated);
+            free(labels);
+            return NULL;
+        }
+        labels[count] = allocated[count];
+        count += 1;
+    }
+
+    menu = cdisplib_display_menu_with_extras(labels, count);
+    for (i = 0; i < count; ++i)
+    {
+        free(allocated[i]);
+    }
+    free(allocated);
+    free(labels);
+
+    return menu;
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_menu_with_extras
+ Description:   Return the shared display menu with extra items appended
+ Parameters:    extra_labels = optional array of extra item labels
+                extra_count = number of extra labels
+ Returns:       menu pointer
+ ******************************************************************/
+wimp_menustr *cdisplib_display_menu_with_extras(const char *const *extra_labels, int extra_count)
+{
+    static const char *const size_labels[] =
+    {
+        "6",
+        "8",
+        "10",
+        "12",
+        "14",
+        "16",
+        "20",
+        "48"
+    };
+    const char **display_labels;
+    int item_count;
+    int i;
+
+    if (extra_count < 0)
+    {
+        extra_count = 0;
+    }
+
+    if (cdisplib_display_menu_state.menu != NULL &&
+        cdisplib_display_menu_extra_count == extra_count)
+    {
+        int matches;
+
+        matches = 1;
+        for (i = 0; i < extra_count; ++i)
+        {
+            if (strcmp(cdisplib_display_menu_state.labels[2 + i], extra_labels[i]) != 0)
+            {
+                matches = 0;
+                break;
+            }
+        }
+        if (matches)
+        {
+            return cdisplib_display_menu_state.menu;
+        }
+    }
+
+    cdisplib_menu_free(&cdisplib_display_menu_state);
+    cdisplib_display_menu_extra_count = extra_count;
+
+    cdisplib_menu_alloc(&cdisplib_size_menu_state, "Sizes", size_labels, 8, 96);
+
+    item_count = 2 + extra_count;
+    display_labels = malloc((size_t) item_count * sizeof(*display_labels));
+    if (display_labels == NULL)
+    {
+        return NULL;
+    }
+
+    display_labels[0] = "Font";
+    display_labels[1] = "Size";
+    for (i = 0; i < extra_count; ++i)
+    {
+        display_labels[2 + i] = extra_labels[i];
+    }
+
+    cdisplib_menu_alloc(&cdisplib_display_menu_state, "Display", display_labels, item_count, 160);
+    free(display_labels);
+
+    if (cdisplib_display_menu_state.items != NULL)
+    {
+        cdisplib_display_menu_state.items[cdisplib_display_menu_font].flags =
+            (wimp_menuflags) (cdisplib_display_menu_state.items[cdisplib_display_menu_font].flags |
+                              wimp_MSUBLINKMSG);
+        cdisplib_display_menu_state.items[cdisplib_display_menu_size].flags =
+            (wimp_menuflags) (cdisplib_display_menu_state.items[cdisplib_display_menu_size].flags |
+                              wimp_MSUBLINKMSG);
+        cdisplib_display_menu_state.items[cdisplib_display_menu_size].submenu =
+            cdisplib_size_menu_state.menu;
+    }
+
+    return cdisplib_display_menu_state.menu;
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_menu_extra_base
+ Description:   Return the first menu index reserved for caller extras
+ Parameters:    none
+ Returns:       index of first extra item
+ ******************************************************************/
+int cdisplib_display_menu_extra_base(void)
+{
+    return 2;
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_edit_menu_setup
+ Description:   Update shaded state on the edit menu
+ Parameters:    display = display whose state controls the menu
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_edit_menu_setup(CDispDisplay *display)
+{
+    int has_selection;
+
+    cdisplib_display_edit_menu();
+    has_selection = cdisplib_display_has_selection(display);
+    cdisplib_menu_set_shaded(&cdisplib_edit_menu_state, cdisplib_edit_copy, !has_selection);
+    cdisplib_menu_set_shaded(&cdisplib_edit_menu_state, cdisplib_edit_clear_selection, !has_selection);
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_menu_setup
+ Description:   Update and optionally open submenus for the display menu
+ Parameters:    display = display whose state controls the menu
+                selection = menu warning selection path, or NULL
+                x = screen x for submenu opening
+                y = screen y for submenu opening
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_menu_setup(CDispDisplay *display, const int *selection, int x, int y)
+{
+    const char *font_name;
+    int size_points;
+    int i;
+    char *tick_font;
+    CDispMenuWarningTarget target;
+
+    cdisplib_display_menu();
+    if (display == NULL)
+    {
+        return;
+    }
+
+    cdisplib_display_get_font(display, &font_name, &size_points);
+    for (i = 0; i < cdisplib_size_menu_state.item_count; ++i)
+    {
+        cdisplib_menu_set_tick(&cdisplib_size_menu_state,
+                               i,
+                               cdisplib_size_values[i] == size_points);
+    }
+
+    tick_font = (font_name == NULL || *font_name == '\0') ? (char *) 1 : (char *) font_name;
+    font_makemenu(&cdisplib_font_menu, tick_font, fontmenu_WithSystemFont);
+    if (cdisplib_display_menu_state.items != NULL)
+    {
+        cdisplib_display_menu_state.items[cdisplib_display_menu_font].submenu = cdisplib_font_menu;
+    }
+
+    if (selection == NULL)
+    {
+        return;
+    }
+
+    target = cdisplib_display_menu_warning_target(selection);
+    switch (target)
+    {
+    case cdisplib_menu_warning_display:
+        if (cdisplib_display_menu_state.menu != NULL)
+        {
+            wimp_create_submenu(cdisplib_display_menu_state.menu, x, y);
+        }
+        break;
+
+    case cdisplib_menu_warning_font:
+        if (cdisplib_font_menu != NULL)
+        {
+            wimp_create_submenu(cdisplib_font_menu, x, y);
+        }
+        break;
+
+    case cdisplib_menu_warning_size:
+        if (cdisplib_size_menu_state.menu != NULL)
+        {
+            wimp_create_submenu(cdisplib_size_menu_state.menu, x, y);
+        }
+        break;
+
+    default:
+        break;
+    }
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_edit_menu_choice
+ Description:   Execute an edit menu choice
+ Parameters:    display = display to affect
+                selection = selection path
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_edit_menu_choice(CDispDisplay *display, const int *selection)
+{
+    if (display == NULL || selection == NULL)
+    {
+        return;
+    }
+
+    switch (selection[0])
+    {
+    case cdisplib_edit_clear:
+        cdisplib_display_clear(display);
+        break;
+
+    case cdisplib_edit_copy:
+        cdisplib_display_copy_selection(display);
+        break;
+
+    case cdisplib_edit_select_all:
+        cdisplib_display_select_all(display);
+        cdisplib_display_edit_menu_setup(display);
+        break;
+
+    case cdisplib_edit_clear_selection:
+        cdisplib_display_selection_clear(display);
+        cdisplib_display_edit_menu_setup(display);
+        break;
+
+    default:
+        break;
+    }
+}
+
+/*******************************************************************
+ Function:      cdisplib_display_menu_choice
+ Description:   Execute a display menu choice
+ Parameters:    display = display to affect
+                selection = selection path
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_menu_choice(CDispDisplay *display, const int *selection)
+{
+    const char *current_font;
+    int current_size;
+
+    if (display == NULL || selection == NULL)
+    {
+        return;
+    }
+
+    switch (selection[0])
+    {
+    case cdisplib_display_menu_font:
+        if (selection[1] != -1)
+        {
+            char *chosen_font;
+
+            cdisplib_display_get_font(display, &current_font, &current_size);
+            if (selection[1] == 0)
+            {
+                cdisplib_display_set_font(display, "", current_size);
+            }
+            else
+            {
+                chosen_font = NULL;
+                if (cdisplib_font_menu != NULL &&
+                    font_decodemenu(cdisplib_font_menu, (int *) (selection + 1), &chosen_font) == NULL &&
+                    chosen_font != NULL)
+                {
+                    cdisplib_display_set_font(display, chosen_font, current_size);
+                }
+                free(chosen_font);
+            }
+        }
+        break;
+
+    case cdisplib_display_menu_size:
+        if (selection[1] >= 0 &&
+            selection[1] < (int) (sizeof(cdisplib_size_values) / sizeof(cdisplib_size_values[0])))
+        {
+            cdisplib_display_get_font(display, &current_font, &current_size);
+            cdisplib_display_set_font(display,
+                                      current_font != NULL ? current_font : "",
+                                      cdisplib_size_values[selection[1]]);
+            cdisplib_display_menu_setup(display, NULL, 0, 0);
+        }
+        break;
+
+    default:
+        break;
+    }
+}
+
+/*******************************************************************
+ Function:      cdisplib_menu_shutdown
+ Description:   Dispose of shared menu structures
+ Parameters:    none
+ Returns:       none
+ ******************************************************************/
+void cdisplib_menu_shutdown(void)
+{
+    cdisplib_menu_free(&cdisplib_edit_menu_state);
+    cdisplib_menu_free(&cdisplib_display_menu_state);
+    cdisplib_menu_free(&cdisplib_size_menu_state);
+    if (cdisplib_font_menu != NULL)
+    {
+        font_makemenu(&cdisplib_font_menu, NULL, fontmenu_Delete);
+        cdisplib_font_menu = NULL;
+    }
+}

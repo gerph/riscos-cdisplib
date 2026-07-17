@@ -1,0 +1,115 @@
+/*******************************************************************
+ * File:        cdisplib_render_internal
+ * Purpose:     Wimp-independent CDispLib renderer data definitions
+ * Author:      Gerph
+ ******************************************************************/
+
+#ifndef CDISPLIB_RENDER_INTERNAL_H
+#define CDISPLIB_RENDER_INTERNAL_H
+
+#include <stdlib.h>
+#include <string.h>
+
+#include "kernel.h"
+#include "swis.h"
+
+#include "cdisplib_render.h"
+
+#define CDISPLIB_RIGHT_FILL_WIDTH      (255 * 16)
+#define CDISPLIB_DEFAULT_FG            7
+#define CDISPLIB_DEFAULT_BG            (-1)
+#define CDISPLIB_MOTTLED_BG            (-2)
+
+typedef enum cdisplib_selection_end
+{
+    cdisplib_selection_anchor_end = 0,
+    cdisplib_selection_focus_end = 1
+} cdisplib_selection_end;
+
+typedef struct cdisplib_text_run
+{
+    struct cdisplib_text_run *next;
+    int foreground;
+    int background;
+    int width;
+    char text[1];
+} CDispTextRun;
+
+#ifndef CDISPLIB_LINE_DECLARED
+#define CDISPLIB_LINE_DECLARED
+typedef struct cdisplib_line CDispLine;
+#endif
+
+struct cdisplib_line
+{
+    struct cdisplib_line *prev;
+    CDispTextRun *runs;
+    struct cdisplib_line *next;
+};
+
+typedef struct cdisplib_selection_point
+{
+    int line;
+    int column;
+} CDispSelectionPoint;
+
+typedef struct cdisplib_selection
+{
+    int active;
+    CDispSelectionPoint anchor;
+    CDispSelectionPoint focus;
+    cdisplib_selection_end dragging_end;
+} CDispSelection;
+
+typedef struct cdisplib_font_metrics
+{
+    char *name;
+    int handle;
+    int size_16ths;
+    int line_height;
+    int max_char_width;
+    int left_margin;
+    int baseline_offset;
+} CDispFontMetrics;
+
+typedef struct cdisplib_palette
+{
+    int *entries;
+    int count;
+} CDispPalette;
+
+struct cdisplib_display
+{
+    struct cdisplib_display *next_global;
+    int window_handle;
+    int line_count;
+    CDispLine *head;
+    CDispLine *tail;
+    char *title;
+    int default_background;
+    int default_foreground;
+    int widest_width;
+    int private_word;
+    int min_width_chars;
+    int natural_height_lines;
+    unsigned int flags;
+    CDispSelection selection;
+    CDispFontMetrics font_metrics;
+    CDispPalette private_palette;
+};
+
+typedef struct cdisplib_selection_bounds
+{
+    int active;
+    CDispSelectionPoint start;
+    CDispSelectionPoint end;
+} CDispSelectionBounds;
+
+void cdisplib_set_colour(const CDispDisplay *display, int colour);
+void cdisplib_set_font_colours(const CDispDisplay *display, int background, int foreground);
+void cdisplib_set_invert_colour(void);
+void cdisplib_selection_bounds(const CDispDisplay *display, CDispSelectionBounds *bounds);
+int cdisplib_column_to_x(const CDispDisplay *display, const CDispLine *line, int column);
+CDispLine *cdisplib_display_line_handle(const CDispDisplay *display, int line_index);
+
+#endif

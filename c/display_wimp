@@ -1,0 +1,50 @@
+/*******************************************************************
+ * File:        display_wimp
+ * Purpose:     Wimp adapter for the CDispLib screen renderer
+ * Author:      Gerph
+ ******************************************************************/
+
+#include "cdisplib_internal.h"
+
+/*******************************************************************
+ Function:      cdisplib_display_redraw
+ Description:   Redraw a display window through the Wimp redraw loop
+ Parameters:    display = display to redraw
+ Returns:       none
+ ******************************************************************/
+void cdisplib_display_redraw(CDispDisplay *display)
+{
+    wimp_redrawstr redraw;
+    BOOL more;
+
+    if (display == NULL || display->window_handle == -1)
+    {
+        return;
+    }
+
+    redraw.w = display->window_handle;
+    if (wimp_redraw_wind(&redraw, &more) != NULL)
+    {
+        return;
+    }
+
+    while (more)
+    {
+        CDispRenderBox clip;
+        int work_left;
+        int work_top;
+
+        work_left = redraw.box.x0 - redraw.scx;
+        work_top = redraw.box.y1 - redraw.scy;
+        clip.x0 = redraw.g.x0;
+        clip.y0 = redraw.g.y0;
+        clip.x1 = redraw.g.x1;
+        clip.y1 = redraw.g.y1;
+        cdisplib_display_render(display, work_left, work_top, &clip);
+
+        if (wimp_get_rectangle(&redraw, &more) != NULL)
+        {
+            break;
+        }
+    }
+}

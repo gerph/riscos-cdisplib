@@ -1,0 +1,121 @@
+/*******************************************************************
+ * File:        standard_render_smoke
+ * Purpose:     CLib-only smoke test for the standard CDispLib renderer
+ * Author:      Gerph
+ ******************************************************************/
+
+#include "cdisplib_render_internal.h"
+
+static CDispTextRun *standard_render_run(const char *text, int foreground, int background);
+static void standard_render_set_colour(int colour);
+
+static void standard_render_set_colour(int colour)
+{
+    _swix(OS_WriteI + 18, 0);
+    _swix(OS_WriteI, 0);
+    _swix(OS_WriteI + (colour & 15), 0);
+}
+
+CDispLine *cdisplib_display_line_handle(const CDispDisplay *display, int line_index)
+{
+    CDispLine *line;
+
+    if (display == NULL || line_index < 0 || line_index >= display->line_count)
+    {
+        return NULL;
+    }
+
+    line = display->head;
+    while (line != NULL && line_index > 0)
+    {
+        line = line->next;
+        line_index -= 1;
+    }
+    return line;
+}
+
+void cdisplib_selection_bounds(const CDispDisplay *display, CDispSelectionBounds *bounds)
+{
+    (void) display;
+    memset(bounds, 0, sizeof(*bounds));
+}
+
+void cdisplib_set_colour(const CDispDisplay *display, int colour)
+{
+    (void) display;
+    standard_render_set_colour(colour);
+}
+
+void cdisplib_set_font_colours(const CDispDisplay *display, int background, int foreground)
+{
+    (void) display;
+    (void) background;
+    cdisplib_set_colour(display, foreground);
+}
+
+void cdisplib_set_invert_colour(void)
+{
+    standard_render_set_colour(7);
+}
+
+static CDispTextRun *standard_render_run(const char *text, int foreground, int background)
+{
+    CDispTextRun *run;
+    size_t length;
+
+    length = strlen(text);
+    run = malloc(sizeof(*run) + length);
+    if (run == NULL)
+    {
+        return NULL;
+    }
+
+    run->next = NULL;
+    run->foreground = foreground;
+    run->background = background;
+    run->width = (int) length * 16;
+    memcpy(run->text, text, length + 1);
+    return run;
+}
+
+int main(void)
+{
+    CDispDisplay display;
+    CDispLine first;
+    CDispLine second;
+    CDispRenderBox clip;
+
+    memset(&display, 0, sizeof(display));
+    memset(&first, 0, sizeof(first));
+    memset(&second, 0, sizeof(second));
+
+    first.runs = standard_render_run("White on red", 7, 1);
+    second.runs = standard_render_run("Black on yellow", 0, 3);
+    if (first.runs == NULL || second.runs == NULL)
+    {
+        free(first.runs);
+        free(second.runs);
+        return 1;
+    }
+
+    first.next = &second;
+    second.prev = &first;
+    display.head = &first;
+    display.tail = &second;
+    display.line_count = 2;
+    display.default_background = -1;
+    display.default_foreground = 7;
+    display.font_metrics.handle = -1;
+    display.font_metrics.line_height = 36;
+    display.font_metrics.max_char_width = 16;
+
+    clip.x0 = 64;
+    clip.y0 = 760;
+    clip.x1 = 1024;
+    clip.y1 = 896;
+    cdisplib_display_render(&display, 64, 896, &clip);
+
+    free(first.runs);
+    free(second.runs);
+    return 0;
+}
