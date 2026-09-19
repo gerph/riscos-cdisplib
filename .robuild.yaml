@@ -39,11 +39,12 @@ jobs:
       # Run the tests
       - echo
       - echo *** Run tests ***
-      - aif32.CDispLib
+      - aif32.CDispLib --selftest
 
       # Copy things for return
       - echo
       - echo *** Copying results ***
+      - cdir Install
       - cdir Install.Lib
       - copy <Exports$Dir>.Lib.CDispLib Install.Lib.CDispLib ~CVRF
 
